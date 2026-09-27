@@ -173,3 +173,10 @@ def test_doctor_flags_real_and_cent_account(cent, capsys):
     out = capsys.readouterr().out
     assert "REAL" in out and "บัญชี REAL: dry-run ไม่ส่งออเดอร์" in out
     assert "บัญชีเซ็นต์ (USC)" in out
+
+
+def test_backtest_auto_summary_with_rr_override(fake, capsys):
+    cli.cmd_backtest(Config(), None, 60, None, False, auto=True, min_rr=1.5, summary=True)
+    out = capsys.readouterr().out
+    assert "ระดับอัตโนมัติ (ย้อน 72 แท่ง วาดใหม่ทุกวัน) · min RR 1.5" in out
+    assert "#Txx | A/B" not in out  # summary: no per-trade table

@@ -5,15 +5,17 @@ sync broker → manage open plan trade → Ghost → Ω → Risk → Zen → app
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 
 from anon.approval import Approver
+from anon.autolevels import draw_levels
 from anon.broker.base import Broker
 from anon.config import Config
 from anon.ghost import Ghost, reprice
-from anon.models import Bar, ClosedTrade, Position
+from anon.models import Bar, ClosedTrade, Position, Signal
 from anon.omega import AIReviewer, Omega
 from anon.quant import Journal, TradeRecord, realized_r
 from anon.risk import Risk, RiskContext
@@ -33,6 +35,19 @@ class EngineEvent:
         return f"{self.time:%Y-%m-%d %H:%M} [{self.kind}] {self.detail}"
 
 
+@dataclass(frozen=True)
+class CallMark:
+    """A Ghost call and what the pipeline did with it (the last event it produced)."""
+
+    bar_time: datetime
+    setup: str
+    entry: float
+    stop: float
+    tp1: float
+    outcome: str
+    detail: str
+
+
 class Engine:
     def __init__(
         self,
@@ -46,8 +61,12 @@ class Engine:
         self.broker = broker
         self.approver = approver
         self.journal = journal
+        self.levels = cfg.levels
         self.ghost = Ghost(cfg.levels, cfg.ghost)
         self.omega = Omega(cfg.levels, cfg.omega, ai)
+        self.levels_day: str | None = None  # auto mode: local day the current levels were drawn for
+        self.levels_ok = not cfg.auto.enabled
+        self.calls: deque[CallMark] = deque(maxlen=200)
         self.risk = Risk(cfg.risk)
         self.zen = Zen(cfg.zen)
         self.magic = cfg.execution.magic
@@ -65,6 +84,8 @@ class Engine:
         now = bars[-1].close_time
         first = len(self.events)
         self._roll_day(now)
+        if self.cfg.auto.enabled and self.levels_day != self.day_key:
+            self._redraw_levels(bars, now)
         self.zen.on_bar()
         self._sync(now)
         self._manage(bars, now)
@@ -94,6 +115,22 @@ class Engine:
             self.day_key = day.isoformat()
             self.zen.roll_day(day)
         self.peak_equity = max(self.peak_equity, account.equity, self.day_start_equity)
+
+    def _redraw_levels(self, bars: Sequence[Bar], now: datetime) -> None:
+        """Auto mode: draw today's levels from bars closed by the start of the local day."""
+        day_start = self._day_start_utc(self._local_day(now))
+        history = [b for b in bars if b.close_time <= day_start]
+        drawn = draw_levels(history, self.cfg.auto, self.cfg.ghost, self.cfg.omega.atr_period)
+        self.levels_day = self.day_key
+        if isinstance(drawn, str):
+            self.levels_ok = False
+            self._emit(now, "levels", f"ไม่วาดเส้นวันนี้: {drawn}")
+            return
+        self.levels_ok = True
+        self.levels = drawn.levels
+        self.ghost = Ghost(drawn.levels, drawn.ghost)
+        self.omega.lv = drawn.levels
+        self._emit(now, "levels", drawn.describe())
 
     def _thb(self, pl: float) -> float | None:
         currency = self.broker.account().currency
@@ -206,14 +243,18 @@ class Engine:
             if p.magic != self.magic or p.ticket in self.thesis_exits:
                 continue
             rec = self.journal.by_ticket(p.ticket)
-            if rec and rec.setup == "A" and close < self.cfg.levels.a_zone_bot:
-                if self.broker.close_position(p.ticket):
-                    self.thesis_exits.add(p.ticket)
-                    self._emit(now, "thesis_exit", f"{rec.id} H1 close {close:.1f} < {self.cfg.levels.a_zone_bot:.0f}")
+            if rec is None or rec.setup != "A":
+                continue
+            thesis = rec.thesis_below if rec.thesis_below is not None else self.cfg.levels.a_zone_bot
+            if close < thesis and self.broker.close_position(p.ticket):
+                self.thesis_exits.add(p.ticket)
+                self._emit(now, "thesis_exit", f"{rec.id} H1 close {close:.1f} < {thesis:.0f}")
 
     # --- trade -----------------------------------------------------------
     def _maybe_trade(self, bars: Sequence[Bar], now: datetime) -> None:
         if any(r.status == "open" and r.id.startswith("#T") for r in self.journal.records.values()):
+            return
+        if not self.levels_ok:
             return
         result = self.ghost.evaluate(bars)
         if result.signal is None:
@@ -230,7 +271,13 @@ class Engine:
             "ghost",
             f"call {sig.setup}/{sig.variant} entry {sig.entry:.1f} stop {sig.stop:.1f} tp1 {sig.tp1:.0f} rr {sig.rr:.2f}",
         )
+        mark = len(self.events)
+        self._decide(sig, bars, now)
+        last = self.events[-1] if len(self.events) > mark else EngineEvent(now, "none", "")
+        self.calls.append(CallMark(sig.bar_time, sig.setup, sig.entry, sig.stop, sig.tp1, last.kind, last.detail))
 
+    def _decide(self, sig: Signal, bars: Sequence[Bar], now: datetime) -> None:
+        """Ω → Risk → Zen → approval → order for one Ghost call."""
         tag = self.omega.tag(bars, sig)
         if not tag.favorable:
             self._emit(now, "omega", f"ไม่เอื้อ ({tag.regime}): {tag.reason}")
@@ -294,6 +341,7 @@ class Engine:
                 on_plan=True,
                 opened_at=now.isoformat(),
                 note=sig.note,
+                thesis_below=self.levels.a_zone_bot if sig.setup == "A" else None,
             )
         )
         self._emit(now, "order", summary)
@@ -309,7 +357,7 @@ class Engine:
             "day_key": self.day_key,
             "day_start_equity": self.day_start_equity,
             "peak_equity": self.peak_equity,
-        }
+        }  # auto levels are redrawn from history after a restart, so they are not stored
 
     def load_state(self, data: dict) -> None:
         self.zen = Zen(self.cfg.zen, ZenState(**data["zen"]))

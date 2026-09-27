@@ -80,9 +80,22 @@ def _fresh_backtest_journal(cfg: Config, journal_path: str | None) -> Journal | 
 
 
 def cmd_backtest(
-    cfg: Config, csv_path: str | None, days: int | None, journal_path: str | None, show_events: bool
+    cfg: Config,
+    csv_path: str | None,
+    days: int | None,
+    journal_path: str | None,
+    show_events: bool,
+    auto: bool = False,
+    min_rr: float | None = None,
+    summary: bool = False,
 ) -> None:
     from anon.backtest import run_backtest
+
+    if auto:
+        cfg = replace(cfg, auto=replace(cfg.auto, enabled=True))
+    if min_rr is not None:
+        cfg = replace(cfg, ghost=replace(cfg.ghost, min_rr=min_rr))
+    cfg.validate()
 
     spec = spread = balance = None
     currency = "USD"
@@ -113,7 +126,11 @@ def cmd_backtest(
         starting_balance=balance,
         currency=currency,
     )
-    _print_result(result, show_events, f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d}")
+    mode = (f"ระดับอัตโนมัติ (ย้อน {cfg.auto.lookback_bars} แท่ง วาดใหม่ทุกวัน)" if cfg.auto.enabled
+            else "ระดับจาก config")
+    header = (f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d} · "
+              f"{mode} · min RR {cfg.ghost.min_rr}")
+    _print_result(result, show_events, header, show_trades=not summary)
     if result.stats.n < cfg.execution.live_auto_min_n:
         print(f"\n⚠️ ไม้ตามแผน n={result.stats.n} < {cfg.execution.live_auto_min_n} — ยังสรุปไม่ได้ว่าระบบได้เปรียบ")
 
@@ -152,6 +169,14 @@ def cmd_doctor(cfg: Config) -> int:
         row(None, "ยังไม่มีคนเคาะค่าที่ต้องยืนยัน (execution.confirmed_by ว่าง) → ส่งออเดอร์จริงไม่ได้")
         for item in unconfirmed_values(cfg):
             print(f"        - {item}")
+
+    from anon.chartfeed import resolve_feed_path
+
+    feed_path = resolve_feed_path(ex.chart_feed)
+    if feed_path:
+        row(True, f"ส่งข้อมูลขึ้นกราฟ: {feed_path}")
+    else:
+        row(None, "ไม่ได้ส่งข้อมูลขึ้นกราฟ (chart_feed ปิด หรือไม่ใช่ Windows)")
 
     if cfg.omega.ai_enabled:
         try:
@@ -225,11 +250,11 @@ def cmd_demo(cfg: Config) -> None:
     _print_result(result, True, f"{len(bars)} synthetic bars")
 
 
-def _print_result(result, show_events: bool, header: str) -> None:
+def _print_result(result, show_events: bool, header: str, show_trades: bool = True) -> None:
     print(header)
     if show_events:
         for e in result.events:
-            if e.kind != "ghost" or e.detail.startswith("call"):
+            if e.kind not in ("ghost", "levels") or e.detail.startswith("call"):
                 print(" ", e)
     acct = result.broker.account()
     print(f"\nbalance {acct.balance:,.2f} equity {acct.equity:,.2f} {acct.currency}")
@@ -238,7 +263,7 @@ def _print_result(result, show_events: bool, header: str) -> None:
         kinds[e.kind] = kinds.get(e.kind, 0) + 1
     print("events:", ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
     print()
-    print(format_report(result.stats, list(result.journal.records.values())))
+    print(format_report(result.stats, list(result.journal.records.values()), show_trades=show_trades))
 
 
 def cmd_report(journal_path: str) -> None:
@@ -276,13 +301,18 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
 
         ai = ClaudeReviewer(cfg.levels, cfg.omega)
 
+    from anon.chartfeed import ChartFeed, resolve_feed_path
+
     broker = MT5Broker(ex)
     broker.connect()
     engine = Engine(cfg, broker, approver, journal, ai)
     state_path = Path(ex.state_path)
     if state_path.exists():
         engine.load_state(json.loads(state_path.read_text(encoding="utf-8")))
+    feed_path = resolve_feed_path(ex.chart_feed)
+    feed = ChartFeed(feed_path) if feed_path else None
     print(f"ANON live on {ex.symbol} | dry_run={ex.dry_run} | approval={ex.approval} | AI={'on' if ai else 'off'}")
+    print(f"กราฟ: {feed_path if feed else 'ปิด (execution.chart_feed)'}")
     last_bar = None
     try:
         while True:
@@ -296,6 +326,10 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
                     log.exception("bar %s failed", last_bar)
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 state_path.write_text(json.dumps(engine.to_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+                if feed:
+                    feed.update(engine, ex.symbol, ex.dry_run, ai is not None)
+            if feed:
+                feed.write()  # heartbeat every poll so the chart can tell the engine is alive
             time.sleep(poll_s)
     except KeyboardInterrupt:
         print("stopped")
@@ -326,6 +360,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--days", type=int, default=365)
     p.add_argument("--journal", default=None)
     p.add_argument("--events", action="store_true")
+    p.add_argument("--auto", action="store_true", help="redraw levels daily from recent structure ([auto] in config)")
+    p.add_argument("--min-rr", type=float, default=None, help="override ghost.min_rr for this run")
+    p.add_argument("--summary", action="store_true", help="statistics only, no per-trade lines")
 
     sub.add_parser("demo", help="synthetic walk-through of every gate")
 
@@ -346,7 +383,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "export":
         cmd_export(cfg, args.days, args.out)
     elif args.cmd == "backtest":
-        cmd_backtest(cfg, args.csv, args.days if args.mt5 else None, args.journal, args.events)
+        cmd_backtest(
+            cfg, args.csv, args.days if args.mt5 else None, args.journal, args.events, args.auto, args.min_rr, args.summary
+        )
     elif args.cmd == "demo":
         cmd_demo(cfg)
     elif args.cmd == "report":

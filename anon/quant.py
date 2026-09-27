@@ -39,6 +39,7 @@ class TradeRecord:
     pl_thb: float | None = None
     minutes: float | None = None
     note: str = ""
+    thesis_below: float | None = None  # A: exit if an H1 bar closes below this level
 
     def form_line(self) -> str:
         r = "-" if self.r is None else f"{self.r:+.2f}R"
@@ -118,6 +119,8 @@ class QuantStats:
     pct_on_plan: float | None = None
     prob_edge_positive: float | None = None
     by_regime: dict[str, dict[str, float]] = field(default_factory=dict)
+    by_setup: dict[str, dict[str, float]] = field(default_factory=dict)
+    by_year: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def bootstrap_prob_positive(rs: list[float], iters: int = 2000, seed: int = 7) -> float:
@@ -158,11 +161,20 @@ def compute_stats(records: list[TradeRecord]) -> QuantStats:
         streak = streak + 1 if x < 0 else 0
         s.max_consecutive_losses = max(s.max_consecutive_losses, streak)
     s.prob_edge_positive = bootstrap_prob_positive(rs)
-    regimes: dict[str, list[float]] = {}
-    for r in plan:
-        regimes.setdefault(r.regime, []).append(r.r)
-    s.by_regime = {k: {"n": len(v), "expectancy_r": statistics.fmean(v)} for k, v in regimes.items()}
+    s.by_regime = _group(plan, lambda r: r.regime)
+    s.by_setup = _group(plan, lambda r: r.setup)
+    s.by_year = _group(plan, lambda r: r.opened_at[:4])
     return s
+
+
+def _group(plan: list[TradeRecord], key) -> dict[str, dict[str, float]]:
+    groups: dict[str, list[float]] = {}
+    for r in plan:
+        groups.setdefault(key(r), []).append(r.r)
+    return {
+        k: {"n": len(v), "expectancy_r": statistics.fmean(v), "sum_r": sum(v), "win_rate": 100 * sum(x > 0 for x in v) / len(v)}
+        for k, v in groups.items()
+    }
 
 
 def auto_live_allowed(stats: QuantStats, min_n: int, min_prob: float) -> tuple[bool, str]:
@@ -175,10 +187,12 @@ def auto_live_allowed(stats: QuantStats, min_n: int, min_prob: float) -> tuple[b
     return True, "ok"
 
 
-def format_report(stats: QuantStats, records: list[TradeRecord]) -> str:
-    lines = ["#Txx | A/B | ระบอบ | เข้า/หยุด/TP1 | lot | ผล R/THB | นาที | ตามแผน | โน้ต"]
-    lines += [r.form_line() for r in records if r.status == "closed"]
-    lines.append("")
+def format_report(stats: QuantStats, records: list[TradeRecord], show_trades: bool = True) -> str:
+    lines: list[str] = []
+    if show_trades:
+        lines.append("#Txx | A/B | ระบอบ | เข้า/หยุด/TP1 | lot | ผล R/THB | นาที | ตามแผน | โน้ต")
+        lines += [r.form_line() for r in records if r.status == "closed"]
+        lines.append("")
     if stats.n == 0:
         lines.append("Quant n=0 — ยังไม่มีไม้ตามแผนที่ปิดแล้ว (ห้ามสรุป E[R])")
     else:
@@ -188,8 +202,12 @@ def format_report(stats: QuantStats, records: list[TradeRecord]) -> str:
             f"ΣR={stats.sum_r:+.2f} PF={pf} maxDD={stats.max_drawdown_r:.2f}R "
             f"แพ้ติด={stats.max_consecutive_losses} P(edge>0)={stats.prob_edge_positive:.2f}"
         )
-        for regime, v in sorted(stats.by_regime.items()):
-            lines.append(f"  Ω {regime}: n={v['n']:.0f} E[R]={v['expectancy_r']:+.3f}")
+        for label, groups in (("setup", stats.by_setup), ("ปี", stats.by_year), ("Ω", stats.by_regime)):
+            for key, v in sorted(groups.items()):
+                lines.append(
+                    f"  {label} {key}: n={v['n']:.0f} win={v['win_rate']:.0f}% "
+                    f"E[R]={v['expectancy_r']:+.3f} ΣR={v['sum_r']:+.1f}"
+                )
     if stats.pct_on_plan is not None:
         lines.append(f"KPI %ตามแผน = {stats.pct_on_plan:.1f}%")
     return "\n".join(lines)
