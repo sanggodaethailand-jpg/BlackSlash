@@ -130,6 +130,12 @@ string     g_txt[];
 color      g_col[];
 int        g_lines = 0;
 int        g_prev_lines = 0;
+string     g_shown_txt[];     // what each panel label shows now: only changed lines are touched
+color      g_shown_col[];
+int        g_bg_lines = -1;
+string     g_levels_key = "";  // DrawLevels input last drawn
+string     g_feed_key = "";    // engine feed content last drawn (heartbeat excluded)
+bool       g_dirty = false;    // something on the chart changed → one ChartRedraw
 
 //+------------------------------------------------------------------+
 //| small helpers                                                    |
@@ -483,21 +489,30 @@ void PanelBg(const int lines)
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
      }
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, Px2(InpPanelWidth));
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, Px2(InpPanelWidth));
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpClrPanel);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, InpClrPanelBorder);
+      g_bg_lines = -1;
+     }
+   if(lines == g_bg_lines)
+      return;
+   g_bg_lines = lines;
    ObjectSetInteger(0, name, OBJPROP_YSIZE, Px2(12) + lines * LineHeight());
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpClrPanel);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, InpClrPanelBorder);
+   g_dirty = true;
   }
 
 void RenderPanel()
   {
    PanelBg(g_lines);
+   ArrayResize(g_shown_txt, IMax(g_lines, g_prev_lines));
+   ArrayResize(g_shown_col, IMax(g_lines, g_prev_lines));
    for(int i = 0; i < g_lines; i++)
      {
       string name = PFX + "P" + IntegerToString(i);
+      bool fresh = false;
       if(ObjectFind(0, name) < 0)
         {
          ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
@@ -505,16 +520,30 @@ void RenderPanel()
          ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
          ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+         ObjectSetString(0, name, OBJPROP_FONT, InpFont);
+         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
+         ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + Px2(8));
+         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + Px2(6) + i * LineHeight());
+         fresh = true;
         }
-      ObjectSetString(0, name, OBJPROP_FONT, InpFont);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + Px2(8));
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + Px2(6) + i * LineHeight());
-      ObjectSetString(0, name, OBJPROP_TEXT, g_txt[i]);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, g_col[i]);
+      if(fresh || i >= g_prev_lines || g_shown_txt[i] != g_txt[i])
+        {
+         ObjectSetString(0, name, OBJPROP_TEXT, g_txt[i]);
+         g_shown_txt[i] = g_txt[i];
+         g_dirty = true;
+        }
+      if(fresh || i >= g_prev_lines || g_shown_col[i] != g_col[i])
+        {
+         ObjectSetInteger(0, name, OBJPROP_COLOR, g_col[i]);
+         g_shown_col[i] = g_col[i];
+         g_dirty = true;
+        }
      }
    for(int i = g_lines; i < g_prev_lines; i++)
+     {
       ObjectDelete(0, PFX + "P" + IntegerToString(i));
+      g_dirty = true;
+     }
    g_prev_lines = g_lines;
   }
 
@@ -981,6 +1010,9 @@ int OnInit()
    g_last_h1 = 0;
    g_markers_for = 0;
    g_prev_lines = 0;
+   g_bg_lines = -1;
+   g_levels_key = "";
+   g_feed_key = "";
    g_breakout = -1;
    g_b_swing_stop = 0.0;
    g_call.setup = 0;
@@ -1015,18 +1047,43 @@ void OnDeinit(const int reason)
    ChartRedraw();
   }
 
+string FeedKey()
+  {
+   string key = "";
+   for(int i = 0; i < g_feed_n; i++)
+      if(StringFind(g_feed_lines[i], "heartbeat=") != 0)
+         key += g_feed_lines[i] + "\n";
+   return key + (FeedFresh() ? "1" : "0") + TimeToString(iTime(_Symbol, _Period, 0));  // tags follow the current bar
+  }
+
 void OnTimer()
   {
+   g_dirty = false;
    CheckNewH1();
-   DrawLevels();
+   string levels_key = TimeToString(iTime(_Symbol, _Period, 0)) + "|" + IntegerToString(g_call.setup) + "|"
+                       + DoubleToString(g_call.stop, 2) + "|" + IntegerToString(g_breakout) + "|"
+                       + DoubleToString(g_b_swing_stop, 2);
+   if(levels_key != g_levels_key)
+     {
+      g_levels_key = levels_key;
+      DrawLevels();
+      g_dirty = true;
+     }
    if(InpShowEngine)
      {
       ReadFeed();
-      DrawEngine();
+      string feed_key = FeedKey();
+      if(feed_key != g_feed_key)
+        {
+         g_feed_key = feed_key;
+         DrawEngine();
+         g_dirty = true;
+        }
      }
    if(InpShowPanel)
       BuildPanel();
-   ChartRedraw();
+   if(g_dirty)
+      ChartRedraw();
   }
 
 int OnCalculate(const int rates_total,
