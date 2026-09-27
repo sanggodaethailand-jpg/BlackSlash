@@ -44,7 +44,7 @@ ai_fail_closed = true
 
 [execution]
 mode = "live"
-symbol = "BTCUSD"
+symbol = "BTCUSD"              # ชื่อที่เติมท้าย เช่น BTCUSDc ใช้ให้เองตอน dry-run; ส่งจริงต้องใส่ชื่อตรง
 magic = 7700700
 approval = "manual"            # "auto" ใช้ได้เมื่อ Quant ผ่านเกณฑ์ n>=30, E[R]>0, P(edge>0)>=0.9
 dry_run = true                 # false + --confirm-live + confirmed_by เท่านั้นถึงส่งออเดอร์จริง
