@@ -1,0 +1,56 @@
+# ANON config — คัดลอกเป็น config/anon.toml แล้วแก้
+# ค่าที่มี "ต้องยืนยัน" ใบส่งมอบไม่ได้กำหนดไว้ หัวหน้า/เจ้าของต้องเคาะเอง
+
+[levels]
+a_zone_bot = 83000.0      # A bot / inv
+a_zone_top = 83500.0      # A top
+b_inv_ref = 84400.0       # อ้างอิงเท่านั้น ไม่ใช่ entry/stop
+gray_center = 84700.0     # เทา NO CHASE
+gray_half_width = 150.0   # ต้องยืนยัน: เทา = 84550–84850
+tp1 = 85500.0
+liq_top = 87000.0
+
+[ghost]
+stop_buffer = 50.0        # stop จริง = low ของ sweep/swing ลบค่านี้
+swing_lookback = 6
+breakout_expiry_bars = 12
+retest_tolerance = 100.0
+min_rr = 1.0              # ต้องยืนยัน
+
+[risk]
+lot = 0.01
+max_lot = 0.01
+risk_per_trade_pct = 0.5
+daily_loss_pct = 2.0
+peak_dd_warn_pct = 5.0
+veto_tickets = [208190412]
+veto_if_unmanaged_open = true
+
+[zen]
+max_consecutive_off_plan = 2
+cooldown_bars_after_loss = 3   # ต้องยืนยัน: "ไม่ไล่คืนทุน"
+restore_widened_stop = true
+
+[omega]
+unfavorable_action = "veto"    # ต้องยืนยัน: "veto" หรือ "tag"
+ema_fast = 20
+ema_slow = 50
+atr_period = 14
+shock_atr_mult = 3.0
+ai_enabled = false             # true = ให้ Claude ช่วย veto (ต้องมี ANTHROPIC_API_KEY)
+ai_model = "claude-opus-5"
+ai_effort = "low"
+ai_fail_closed = true
+
+[execution]
+mode = "live"
+symbol = "BTCUSD"
+magic = 7700700
+approval = "manual"            # "auto" ใช้ได้เมื่อ Quant ผ่านเกณฑ์ n>=30, E[R]>0, P(edge>0)>=0.9
+dry_run = true                 # false + --confirm-live เท่านั้นถึงส่งออเดอร์จริง
+deviation = 50
+server_utc_offset_hours = 3.0  # ต้องยืนยัน: เวลาเซิร์ฟเวอร์โบรกเกอร์ลบ UTC
+day_utc_offset_hours = 7.0     # ตัดวันตามเวลาไทย
+journal_path = "journal/anon_journal.jsonl"
+state_path = "state/anon_state.json"
+# usdthb = 33.42               # ใส่เมื่อต้องการแปลง P/L จริงเป็นบาทในบันทึก
