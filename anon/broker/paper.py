@@ -131,7 +131,7 @@ class PaperBroker:
 
     def _pnl(self, pos: Position, exit_price: float) -> float:
         move = exit_price - pos.price_open if pos.side == "buy" else pos.price_open - exit_price
-        return move * pos.volume * self._spec.contract_size
+        return move * pos.volume * self._spec.money_per_point
 
     def _unrealized(self, pos: Position) -> float:
         if self._bid is None:

@@ -70,6 +70,10 @@ anon live                                        # MT5 dry-run: คำนวณ�
 anon live --confirm-live                         # ส่งจริง: ต้องมี dry_run=false และ confirmed_by
 ```
 
+**ชื่อสัญลักษณ์กับบัญชีเซ็นต์:** ถ้าโบรกเกอร์ใช้ชื่ออื่น เช่น Exness ใช้ `BTCUSDc` ให้แก้ `execution.symbol` ใน `config\anon.toml`
+ถ้าชื่อไม่ตรง `anon doctor` จะบอกชื่อ BTC ที่โบรกเกอร์มีให้เลือก
+ความเสี่ยงคิดจาก tick value ของโบรกเกอร์ในสกุลเงินของบัญชี จึงใช้ได้กับบัญชีเซ็นต์ (USC) ด้วย
+
 ทุกคำสั่งรับ `--config config/anon.toml` ได้ (ใส่ก่อนชื่อคำสั่ง)
 เวลาเซิร์ฟเวอร์ของโบรกเกอร์หาเองจากราคาล่าสุด (`server_utc_offset_hours = "auto"`)
 backtest จะไม่ยอมเขียนทับ journal ของ live

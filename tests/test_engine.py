@@ -147,3 +147,18 @@ def test_price_moving_during_approval_cancels_the_order():
     feed(engine, broker, then(flat(84000, 60), [DIP]))
     assert "stale_after_approval" in kinds(engine.events)
     assert not engine.journal.records
+
+
+def test_paper_pnl_uses_the_broker_money_per_point():
+    from anon.models import Bar
+
+    cent = SymbolSpec(1.0, 0.01, 0.01, value_per_point=100.0)
+    broker = PaperBroker(cent, 298_428.0, 0.0, "USC")
+    bars = flat(84000, 1)
+    broker.process_bar(bars[0])
+    broker.open_market("buy", 0.01, 83000, 85000, 1, "x")
+    t = bars[0].close_time
+    broker.process_bar(Bar(t, 84000, 85100, 83900, 85050))  # fills at 84000, hits TP 85000
+    (closed,) = broker.closed_since(t)
+    assert closed.profit == pytest.approx(1000 * 0.01 * 100)  # 1000 points = 1,000 USC = $10
+    assert broker.account().currency == "USC"

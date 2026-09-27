@@ -139,3 +139,37 @@ def test_math_reads_the_real_account(fake, capsys):
     cli.cmd_math(Config(), equity=1000, usdthb=None, use_mt5=True)
     out = capsys.readouterr().out
     assert "จาก MT5: equity 1,188.00 USD" in out and "จากโบรกเกอร์" in out
+
+
+class CentFakeMT5(FakeMT5):
+    def symbol_info(self, symbol):
+        info = super().symbol_info(symbol)
+        info.trade_tick_size, info.trade_tick_value_loss = 0.01, 1.0  # 100 USC per point per lot
+        return info
+
+    def account_info(self):
+        return SimpleNamespace(login=257501588, server="Exness-MT5Real36", trade_mode=2, currency="USC",
+                               balance=298428.0, equity=298428.0)
+
+
+@pytest.fixture
+def cent(monkeypatch):
+    mod = CentFakeMT5()
+    monkeypatch.setitem(sys.modules, "MetaTrader5", mod)
+    return mod
+
+
+def test_math_on_a_cent_account_uses_cents(cent, capsys):
+    cli.cmd_math(Config(), equity=0, usdthb=33.42, use_mt5=True)
+    out = capsys.readouterr().out
+    assert "298,428.00 USC (บัญชีเซ็นต์" in out
+    assert "lot 0.01 = 1 USC ต่อ 1 จุด" in out
+    assert "A ขอบบน: เข้า 83,518 หยุด 82,950 → เสี่ยง 568.00 USC (0.19%)" in out
+    assert "ต้องได้ 29,922 จุดต่อวัน" in out  # same point target as a USD account
+
+
+def test_doctor_flags_real_and_cent_account(cent, capsys):
+    assert cli.cmd_doctor(Config()) == 0
+    out = capsys.readouterr().out
+    assert "REAL" in out and "บัญชี REAL: dry-run ไม่ส่งออเดอร์" in out
+    assert "บัญชีเซ็นต์ (USC)" in out

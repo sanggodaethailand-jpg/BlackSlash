@@ -52,6 +52,16 @@ class SymbolSpec:
     contract_size: float
     volume_min: float
     volume_step: float
+    value_per_point: float | None = None  # from the broker's tick value, in the account currency
+
+    @property
+    def money_per_point(self) -> float:
+        """Account-currency value of a 1.0 price move on 1 lot.
+
+        The broker's tick value already converts to the account currency (e.g. USC on a
+        cent account); without it, the contract size assumes the account is in the quote
+        currency (USD for BTCUSD)."""
+        return self.contract_size if self.value_per_point is None else self.value_per_point
 
 
 @dataclass(frozen=True)
