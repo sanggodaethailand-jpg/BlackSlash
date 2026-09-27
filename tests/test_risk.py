@@ -77,3 +77,13 @@ def test_peak_drawdown_warns_without_veto():
 def test_risk_money_formula():
     assert risk_money(83500, 83000, 0.01, 1.0) == pytest.approx(5.0)
     assert risk_money(83500, 83000, 1.0, 1.0) == pytest.approx(500.0)
+
+
+def test_cent_account_risk_is_counted_in_cents():
+    # Exness-style cent account: equity in USC, broker tick value makes 1 point on 1 lot = 100 USC
+    cent = SymbolSpec(contract_size=1.0, volume_min=0.01, volume_step=0.01, value_per_point=100.0)
+    c = RiskContext(Account(298_428.0, 298_428.0, "USC"), [], cent, 298_428.0, 298_428.0, MAGIC)
+    d = Risk(RiskConfig()).check(sig(), c)
+    assert d.risk_money == pytest.approx(500.0)  # 500 points x 0.01 lot x 100 USC
+    assert d.risk_pct == pytest.approx(500 / 298_428 * 100)  # ~0.17%, not 0.0017%
+    assert d.ok

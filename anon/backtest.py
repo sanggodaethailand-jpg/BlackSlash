@@ -32,6 +32,7 @@ def run_backtest(
     spec: SymbolSpec | None = None,
     spread: float | None = None,
     starting_balance: float | None = None,
+    currency: str = "USD",
 ) -> BacktestResult:
     ex = cfg.execution
     spec = spec or SymbolSpec(ex.contract_size, ex.volume_min, ex.volume_step)
@@ -39,6 +40,7 @@ def run_backtest(
         spec,
         ex.starting_balance if starting_balance is None else starting_balance,
         ex.spread if spread is None else spread,
+        currency,
     )
     journal = journal or Journal(None)
     engine = Engine(cfg, broker, AutoApprover(), journal, ai)

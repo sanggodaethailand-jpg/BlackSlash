@@ -99,8 +99,9 @@ class Engine:
         currency = self.broker.account().currency
         if currency == "THB":
             return pl
-        if currency == "USD" and self.cfg.execution.usdthb:
-            return pl * self.cfg.execution.usdthb
+        if currency in ("USD", "USC") and self.cfg.execution.usdthb:
+            usd = pl / 100 if currency == "USC" else pl  # USC = US cents
+            return usd * self.cfg.execution.usdthb
         return None
 
     # --- sync ------------------------------------------------------------

@@ -102,3 +102,25 @@ def test_positions_and_closed_trades_mapping():
     assert c.ticket == 9 and c.exit_reason == "tp" and c.side == "buy"
     assert c.profit == pytest.approx(20.9)
     assert (c.time_close - c.time_open).total_seconds() == 7200
+
+
+def test_money_per_point_comes_from_tick_value():
+    b = broker()
+    b.mt5.info.trade_tick_size = 0.01
+    b.mt5.info.trade_tick_value_loss = 1.0  # 1 USC per 0.01 move per lot (cent account)
+    spec = b.spec()
+    assert spec.value_per_point == pytest.approx(100.0)
+    assert spec.money_per_point == pytest.approx(100.0)
+
+
+def test_money_per_point_falls_back_to_contract_size():
+    assert broker().spec().money_per_point == 1.0
+
+
+def test_unknown_symbol_lists_what_the_broker_has():
+    b = broker()
+    b.mt5.initialize = lambda *a, **k: True
+    b.mt5.symbol_select = lambda s, e: False
+    b.mt5.symbols_get = lambda group: (SimpleNamespace(name="BTCUSDc"), SimpleNamespace(name="BTCJPYc"))
+    with pytest.raises(RuntimeError, match="BTCUSDc, BTCJPYc"):
+        b.connect()

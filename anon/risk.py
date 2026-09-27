@@ -34,8 +34,9 @@ class RiskDecision:
         return not self.vetoes
 
 
-def risk_money(entry: float, stop: float, lot: float, contract_size: float) -> float:
-    return abs(entry - stop) * lot * contract_size
+def risk_money(entry: float, stop: float, lot: float, money_per_point: float) -> float:
+    """Loss in account currency if the stop is hit; see SymbolSpec.money_per_point."""
+    return abs(entry - stop) * lot * money_per_point
 
 
 def _on_step(volume: float, step: float) -> bool:
@@ -70,7 +71,7 @@ class Risk:
             return d
 
         if numeric_stop and not wrong_side:
-            d.risk_money = risk_money(signal.entry, signal.stop, cfg.lot, ctx.spec.contract_size)
+            d.risk_money = risk_money(signal.entry, signal.stop, cfg.lot, ctx.spec.money_per_point)
             d.risk_pct = d.risk_money / equity * 100
             if d.risk_pct > cfg.risk_per_trade_pct + 1e-9:
                 d.vetoes.append(f"risk_{d.risk_pct:.2f}pct_above_{cfg.risk_per_trade_pct}pct")

@@ -27,7 +27,12 @@ def _mt5(cfg: Config):
     return broker
 
 
+def _cent_note(ccy: str) -> str:
+    return " (บัญชีเซ็นต์: 100 USC = 1 USD)" if ccy == "USC" else ""
+
+
 def cmd_math(cfg: Config, equity: float, usdthb: float | None, use_mt5: bool) -> None:
+    lv, rk, g = cfg.levels, cfg.risk, cfg.ghost
     if use_mt5:
         broker = _mt5(cfg)
         try:
@@ -35,28 +40,31 @@ def cmd_math(cfg: Config, equity: float, usdthb: float | None, use_mt5: bool) ->
             bid, ask = broker.quote()
         finally:
             broker.shutdown()
-        equity = account.equity
-        cfg = replace(cfg, execution=replace(cfg.execution, contract_size=spec.contract_size, spread=ask - bid))
-        print(f"จาก MT5: equity {equity:,.2f} {account.currency} · contract size {spec.contract_size} · spread {ask - bid:.1f}")
-    lv, rk, ex, g = cfg.levels, cfg.risk, cfg.execution, cfg.ghost
-    per_point = rk.lot * ex.contract_size
-    source = "จากโบรกเกอร์" if use_mt5 else "สมมติ — ใช้ --mt5 เพื่ออ่านค่าจริง"
-    print(f"contract size {ex.contract_size} ({source}) → lot {rk.lot} = {per_point} ต่อ 1 จุด")
+        equity, ccy, money_per_point, spread = account.equity, account.currency, spec.money_per_point, ask - bid
+        print(f"จาก MT5: equity {equity:,.2f} {ccy}{_cent_note(ccy)} · contract size {spec.contract_size} · spread {spread:.1f}")
+        source = "จากโบรกเกอร์"
+    else:
+        ccy, money_per_point, spread = "USD", cfg.execution.contract_size, cfg.execution.spread
+        source = "สมมติ — ใช้ --mt5 เพื่ออ่านค่าจริง"
+    per_point = rk.lot * money_per_point
+    print(f"lot {rk.lot} = {per_point:,.4g} {ccy} ต่อ 1 จุด ({source})")
     max_stop = equity * rk.risk_per_trade_pct / 100 / per_point
-    print(f"พอร์ต {equity:,.0f} USD → stop ได้ไกลสุด {max_stop:,.0f} จุด ต่อไม้ (≤{rk.risk_per_trade_pct}%)")
+    print(f"พอร์ต {equity:,.0f} {ccy} → stop ได้ไกลสุด {max_stop:,.0f} จุด ต่อไม้ (≤{rk.risk_per_trade_pct}%)")
     a_stop = lv.a_zone_bot - g.stop_buffer
-    for label, entry in (("A ขอบบน", lv.a_zone_top + ex.spread), ("A กลางโซน", (lv.a_zone_bot + lv.a_zone_top) / 2 + ex.spread)):
+    for label, entry in (("A ขอบบน", lv.a_zone_top + spread), ("A กลางโซน", (lv.a_zone_bot + lv.a_zone_top) / 2 + spread)):
         risk = (entry - a_stop) * per_point
         rr = (lv.tp1 - entry) / (entry - a_stop)
         need = risk / (rk.risk_per_trade_pct / 100)
-        print(f"{label}: เข้า {entry:,.0f} หยุด {a_stop:,.0f} → เสี่ยง {risk:.2f} USD, RR {rr:.2f}, ต้องมีพอร์ต ≥ {need:,.0f} USD")
+        print(f"{label}: เข้า {entry:,.0f} หยุด {a_stop:,.0f} → เสี่ยง {risk:,.2f} {ccy} ({risk / equity * 100:.2f}%), "
+              f"RR {rr:.2f}, ต้องมีพอร์ต ≥ {need:,.0f} {ccy}")
     b_stop = lv.b_inv_ref - g.stop_buffer
     b_max = (lv.tp1 + g.min_rr * b_stop) / (1 + g.min_rr)
     print(f"B (ตัวอย่าง stop {b_stop:,.0f}): เข้าได้ไม่เกิน {b_max:,.0f} ถึงจะได้ RR ≥ {g.min_rr} "
           f"→ หน้าต่าง {lv.gray_high:,.0f}–{b_max:,.0f} ({max(0.0, b_max - lv.gray_high):,.0f} จุด)")
-    print(f"เพดานวัน {rk.daily_loss_pct}% ของ {equity:,.0f} = {equity * rk.daily_loss_pct / 100:,.2f} USD")
-    if usdthb:
-        pts = 10_000 / usdthb / per_point
+    print(f"เพดานวัน {rk.daily_loss_pct}% ของ {equity:,.0f} = {equity * rk.daily_loss_pct / 100:,.2f} {ccy}")
+    if usdthb and ccy in ("USD", "USC"):
+        target = 10_000 / usdthb * (100 if ccy == "USC" else 1)
+        pts = target / per_point
         print(f"10,000 บาท/วัน ที่ lot {rk.lot}: ต้องได้ {pts:,.0f} จุดต่อวัน → VETO ถูกต้อง (ไม่ใช้เป็น KPI)")
 
 
@@ -77,6 +85,7 @@ def cmd_backtest(
     from anon.backtest import run_backtest
 
     spec = spread = balance = None
+    currency = "USD"
     if csv_path:
         from anon.data import load_bars
 
@@ -90,12 +99,19 @@ def cmd_backtest(
             bid, ask = broker.quote()
         finally:
             broker.shutdown()
-        spread, balance = ask - bid, account.equity
-        source = f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {spread:.1f}, เริ่มที่ equity จริง {balance:,.2f})"
+        spread, balance, currency = ask - bid, account.equity, account.currency
+        source = (f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {spread:.1f}, "
+                  f"เริ่มที่ equity จริง {balance:,.2f} {currency}{_cent_note(currency)})")
     if not bars:
         sys.exit("ไม่มีแท่งให้ backtest")
     result = run_backtest(
-        cfg, bars, _fresh_backtest_journal(cfg, journal_path), spec=spec, spread=spread, starting_balance=balance
+        cfg,
+        bars,
+        _fresh_backtest_journal(cfg, journal_path),
+        spec=spec,
+        spread=spread,
+        starting_balance=balance,
+        currency=currency,
     )
     _print_result(result, show_events, f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d}")
     if result.stats.n < cfg.execution.live_auto_min_n:
@@ -168,8 +184,13 @@ def cmd_doctor(cfg: Config) -> int:
                   f"balance {info.balance:,.2f} equity {info.equity:,.2f}")
         if mode == "REAL" and not ex.dry_run:
             row(None, "บัญชีจริง + dry_run=false → ทุกไม้จะใช้เงินจริง")
+        elif mode == "REAL":
+            row(None, "บัญชี REAL: dry-run ไม่ส่งออเดอร์ แต่ก่อนส่งจริงให้ทดสอบบนบัญชี DEMO ก่อน")
         spec = broker.spec()
-        row(True, f"{ex.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step}")
+        row(True, f"{ex.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step} · "
+                  f"lot {cfg.risk.lot} = {cfg.risk.lot * spec.money_per_point:,.4g} {info.currency} ต่อ 1 จุด")
+        if info.currency == "USC":
+            row(None, "บัญชีเซ็นต์ (USC): ตัวเลขเงินทั้งหมดเป็นเซ็นต์ 100 USC = 1 USD — Risk คิดเป็น USC ให้แล้ว")
         steps = cfg.risk.lot / spec.volume_step
         tradable = cfg.risk.lot >= spec.volume_min - 1e-9 and abs(steps - round(steps)) < 1e-6
         row(tradable, f"lot {cfg.risk.lot} {'ส่งได้' if tradable else 'ส่งไม่ได้'}กับโบรกเกอร์นี้")

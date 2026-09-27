@@ -47,7 +47,11 @@ class MT5Broker:
         if not ok:
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
         if not mt5.symbol_select(self.symbol, True):
-            raise RuntimeError(f"cannot select {self.symbol}: {mt5.last_error()}")
+            error = mt5.last_error()
+            listing = getattr(mt5, "symbols_get", None)
+            names = [s.name for s in (listing(group="*BTC*") or ())] if listing else []
+            hint = f" — ชื่อ BTC ที่โบรกเกอร์นี้มี: {', '.join(names)} (ใส่ใน execution.symbol)" if names else ""
+            raise RuntimeError(f"cannot select {self.symbol}: {error}{hint}")
         if self.offset is None:
             self.offset = self.detect_offset()
             log.info("server clock = UTC%+.1fh (auto)", self.offset.total_seconds() / 3600)
@@ -85,7 +89,10 @@ class MT5Broker:
         info = self.mt5.symbol_info(self.symbol)
         if info is None:
             raise RuntimeError(f"symbol_info failed: {self.mt5.last_error()}")
-        return SymbolSpec(float(info.trade_contract_size), float(info.volume_min), float(info.volume_step))
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+        tick_value = float(getattr(info, "trade_tick_value_loss", 0.0) or getattr(info, "trade_tick_value", 0.0) or 0.0)
+        value = tick_value / tick_size if tick_size > 0 and tick_value > 0 else None
+        return SymbolSpec(float(info.trade_contract_size), float(info.volume_min), float(info.volume_step), value)
 
     def quote(self) -> tuple[float, float]:
         tick = self.mt5.symbol_info_tick(self.symbol)
