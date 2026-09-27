@@ -1,4 +1,4 @@
-"""Command line: doctor | math | export | backtest | demo | report | live"""
+"""Command line: doctor | math | export | backtest | sweep | demo | report | live"""
 
 from __future__ import annotations
 
@@ -79,6 +79,54 @@ def _fresh_backtest_journal(cfg: Config, journal_path: str | None) -> Journal | 
     return Journal(path)
 
 
+def _history(cfg: Config, csv_path: str | None, days: int | None) -> tuple[list, str, dict]:
+    """Bars plus the broker's spec/spread/equity/currency (MT5), or bars from a CSV with config defaults."""
+    if csv_path:
+        from anon.data import load_bars
+
+        bars, source, market = load_bars(csv_path, static_offset_hours(cfg)), csv_path, {}
+    else:
+        broker = _mt5(cfg)
+        try:
+            bars = broker.closed_bars(days * 24)
+            spec, account = broker.spec(), broker.account()
+            bid, ask = broker.quote()
+        finally:
+            broker.shutdown()
+        market = {
+            "spec": spec,
+            "spread": ask - bid,
+            "starting_balance": account.equity,
+            "currency": account.currency,
+        }
+        source = (f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {ask - bid:.1f}, "
+                  f"เริ่มที่ equity จริง {account.equity:,.2f} {account.currency}{_cent_note(account.currency)})")
+    if not bars:
+        sys.exit("ไม่มีแท่งให้ backtest")
+    return bars, source, market
+
+
+def cmd_sweep(
+    cfg: Config,
+    csv_path: str | None,
+    days: int | None,
+    rrs: list[float],
+    lookbacks: list[int],
+    null_trials: int = 0,
+    target: tuple[int, float] = (72, 1.5),
+) -> None:
+    from anon.research import format_null, format_sweep, run_null_test, run_sweep
+
+    bars, source, market = _history(cfg, csv_path, days)
+    print(f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d} · ระดับอัตโนมัติ · "
+          f"ลอง {len(rrs) * len(lookbacks)} แบบ + เทียบข้อมูลสุ่ม {null_trials} ชุด (อาจใช้เวลาหลายนาที)\n", flush=True)
+    rows = run_sweep(cfg, bars, rrs, lookbacks, **market)
+    print(format_sweep(rows, current=target), flush=True)
+    if null_trials > 0:
+        print()
+        print(format_null(run_null_test(cfg, bars, target[0], target[1], null_trials, **market)))
+
+
 def cmd_backtest(
     cfg: Config,
     csv_path: str | None,
@@ -97,35 +145,8 @@ def cmd_backtest(
         cfg = replace(cfg, ghost=replace(cfg.ghost, min_rr=min_rr))
     cfg.validate()
 
-    spec = spread = balance = None
-    currency = "USD"
-    if csv_path:
-        from anon.data import load_bars
-
-        bars = load_bars(csv_path, static_offset_hours(cfg))
-        source = csv_path
-    else:
-        broker = _mt5(cfg)
-        try:
-            bars = broker.closed_bars(days * 24)
-            spec, account = broker.spec(), broker.account()
-            bid, ask = broker.quote()
-        finally:
-            broker.shutdown()
-        spread, balance, currency = ask - bid, account.equity, account.currency
-        source = (f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {spread:.1f}, "
-                  f"เริ่มที่ equity จริง {balance:,.2f} {currency}{_cent_note(currency)})")
-    if not bars:
-        sys.exit("ไม่มีแท่งให้ backtest")
-    result = run_backtest(
-        cfg,
-        bars,
-        _fresh_backtest_journal(cfg, journal_path),
-        spec=spec,
-        spread=spread,
-        starting_balance=balance,
-        currency=currency,
-    )
+    bars, source, market = _history(cfg, csv_path, days)
+    result = run_backtest(cfg, bars, _fresh_backtest_journal(cfg, journal_path), **market)
     mode = (f"ระดับอัตโนมัติ (ย้อน {cfg.auto.lookback_bars} แท่ง วาดใหม่ทุกวัน)" if cfg.auto.enabled
             else "ระดับจาก config")
     header = (f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d} · "
@@ -349,6 +370,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--usdthb", type=float, default=None)
     p.add_argument("--mt5", action="store_true", help="read equity, contract size and spread from MT5")
 
+    p = sub.add_parser("sweep", help="robustness: auto-levels backtest over a grid of min RR x lookback")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--csv")
+    src.add_argument("--mt5", action="store_true")
+    p.add_argument("--days", type=int, default=1825)
+    p.add_argument("--rr", default="1.0,1.25,1.5,1.75,2.0", help="comma-separated min RR values")
+    p.add_argument("--lookback", default="48,72,96", help="comma-separated lookback bars")
+    p.add_argument("--null", type=int, default=30, help="shuffled-history trials for the target setting (0 = skip)")
+    p.add_argument("--target", default="72,1.5", help="lookback,min_rr to test against shuffled history")
+
     p = sub.add_parser("export", help="save closed H1 bars from MT5 to CSV (UTC)")
     p.add_argument("--days", type=int, default=365)
     p.add_argument("--out", default="data/BTCUSD_H1.csv")
@@ -380,6 +411,11 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1 if cmd_doctor(cfg) else 0)
     elif args.cmd == "math":
         cmd_math(cfg, args.equity, args.usdthb, args.mt5)
+    elif args.cmd == "sweep":
+        rrs = [float(x) for x in args.rr.split(",") if x.strip()]
+        lookbacks = [int(x) for x in args.lookback.split(",") if x.strip()]
+        lookback, rr = args.target.split(",")
+        cmd_sweep(cfg, args.csv, args.days if args.mt5 else None, rrs, lookbacks, args.null, (int(lookback), float(rr)))
     elif args.cmd == "export":
         cmd_export(cfg, args.days, args.out)
     elif args.cmd == "backtest":

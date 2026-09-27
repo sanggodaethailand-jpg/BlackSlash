@@ -180,3 +180,10 @@ def test_backtest_auto_summary_with_rr_override(fake, capsys):
     out = capsys.readouterr().out
     assert "ระดับอัตโนมัติ (ย้อน 72 แท่ง วาดใหม่ทุกวัน) · min RR 1.5" in out
     assert "#Txx | A/B" not in out  # summary: no per-trade table
+
+
+def test_sweep_from_mt5_prints_the_grid(fake, capsys):
+    cli.cmd_sweep(Config(), None, 60, rrs=[1.0, 1.5], lookbacks=[72], null_trials=2, target=(72, 1.5))
+    out = capsys.readouterr().out
+    assert "ลอง 2 แบบ" in out and "ช่อง" in out and "เทียบกับความบังเอิญ" in out
+    assert out.count("|") > 6
