@@ -6,10 +6,11 @@
 #   report   Quant report of the live journal
 #   research robustness sweep on MT5 history (default 5 years): auto levels, min RR 1.0-2.0 x lookback 48/72/96
 #   dryrun   live loop in dry-run: computes everything, sends nothing (Ctrl+C to stop)
-# This script never sends real orders. Real orders need: dry_run = false, confirmed_by set,
-# and a manual "anon live --confirm-live".
+#   golive   REAL MONEY (live.bat): asks the owner to confirm, writes config\anon.live.toml,
+#            runs doctor on it, then the live loop; every trade still needs the typed approval
+# Only the golive task can send real orders, and only after the owner types the confirmation.
 param(
-    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research")]
+    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research", "golive")]
     [string]$Task = "all",
     [int]$Days = 365
 )
@@ -46,6 +47,7 @@ switch ($Task) {
     "backtest" { [void](Anon $BacktestArgs) }
     "report"   { [void](Anon @("report", "--journal", "journal/anon_journal.jsonl")) }
     "dryrun"   { [void](Anon @("live")) }
+    "golive"   { [void](Anon @("golive") -AllowFail) }
     "research" {
         $span = if ($PSBoundParameters.ContainsKey("Days")) { $Days } else { 1825 }
         [void](Anon @("sweep", "--mt5", "--days", "$span"))

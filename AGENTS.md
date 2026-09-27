@@ -8,6 +8,8 @@
   และห้ามปิด VETO ของ Risk / Zen
 - ห้ามใช้ martingale, grid, averaging down หรือเพิ่ม lot หลังแพ้
 - ห้ามใส่รหัสผ่าน คีย์ หรือเลขบัญชีใน repo (credentials มาจาก environment เท่านั้น)
+- `live.bat` / `anon golive` เป็นของเจ้าของเท่านั้น: AI ห้ามรันแทน ห้ามสร้าง `config/anon.live.toml`
+  ห้ามตัดขั้นพิมพ์ยืนยัน `เงินจริง` หรือการพิมพ์ `อนุมัติ #Txx` ทีละไม้
 
 ## Idea Lab: 5 ด่าน (`anon/lab`)
 ไอเดียหนึ่งตัวคือไฟล์เดียวใน `anon/lab/ideas/<name>.py` (ก๊อปจาก `_template.py`) ต้องมี

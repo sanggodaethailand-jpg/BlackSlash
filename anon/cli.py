@@ -1,4 +1,4 @@
-"""Command line: doctor | math | export | backtest | sweep | lab | demo | report | live"""
+"""Command line: doctor | math | export | backtest | sweep | lab | demo | report | live | golive"""
 
 from __future__ import annotations
 
@@ -290,6 +290,12 @@ def cmd_doctor(cfg: Config) -> int:
         if broker.symbol != ex.symbol:
             row(None, f"โบรกเกอร์นี้ไม่มี {ex.symbol} → dry-run ใช้ {broker.symbol} แทน "
                       f"(ส่งออเดอร์จริงต้องใส่ symbol = \"{broker.symbol}\" ใน config เอง)")
+        terminal = getattr(broker.mt5, "terminal_info", lambda: None)()
+        algo = getattr(terminal, "trade_allowed", None)
+        if algo is not None and ex.dry_run:
+            row(True if algo else None, f"Algo Trading ใน MT5 {'เปิด' if algo else 'ปิด'}อยู่ (dry-run ไม่ต้องใช้ · ส่งจริงต้องเปิด)")
+        elif algo is not None:
+            row(bool(algo), "Algo Trading ใน MT5 เปิดอยู่" if algo else "Algo Trading ใน MT5 ปิดอยู่ → กดปุ่ม Algo Trading ให้เป็นสีเขียว")
         spec = broker.spec()
         row(True, f"{broker.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step} · "
                   f"lot {cfg.risk.lot} = {cfg.risk.lot * spec.money_per_point:,.4g} {info.currency} ต่อ 1 จุด")
@@ -384,6 +390,10 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
 
     broker = MT5Broker(ex)
     broker.connect()
+    terminal = getattr(broker.mt5, "terminal_info", lambda: None)()
+    if not ex.dry_run and getattr(terminal, "trade_allowed", True) is False:
+        broker.shutdown()
+        sys.exit("ส่งออเดอร์จริงไม่ได้: Algo Trading ใน MT5 ปิดอยู่ → กดปุ่ม Algo Trading ให้เป็นสีเขียวแล้วรันใหม่")
     engine = Engine(cfg, broker, approver, journal, ai)
     state_path = Path(ex.state_path)
     if state_path.exists():
@@ -414,6 +424,21 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
         print("stopped")
     finally:
         broker.shutdown()
+
+
+def cmd_golive(cfg: Config, config_path: str | None, poll_s: float, input_fn=input) -> None:
+    """Owner-only real-money launch: confirm, write the live config, check everything, then run."""
+    from anon.golive import prepare_live_config
+
+    base = Path(config_path) if config_path else Path("config") / "anon.example.toml"
+    live = prepare_live_config(base, base.with_name("anon.live.toml"), cfg, input_fn)
+    if live is None:
+        sys.exit(1)
+    print("\n== ตรวจความพร้อมก่อนส่งจริง ==")
+    if cmd_doctor(live):
+        sys.exit("หยุด: แก้ข้อ [XX] ด้านบนก่อน แล้วรัน live.bat ใหม่ (ยังไม่มีออเดอร์ถูกส่ง)")
+    print()
+    cmd_live(live, confirm_live=True, poll_s=poll_s)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -470,6 +495,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--confirm-live", action="store_true")
     p.add_argument("--poll", type=float, default=15.0)
 
+    p = sub.add_parser("golive", help="owner only: confirm, write config/anon.live.toml, doctor, then trade for real")
+    p.add_argument("--poll", type=float, default=15.0)
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
@@ -497,3 +525,5 @@ def main(argv: list[str] | None = None) -> None:
         cmd_report(args.journal)
     elif args.cmd == "live":
         cmd_live(cfg, args.confirm_live, args.poll)
+    elif args.cmd == "golive":
+        cmd_golive(cfg, args.config, args.poll)
