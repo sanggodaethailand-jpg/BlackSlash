@@ -1,0 +1,854 @@
+﻿//+------------------------------------------------------------------+
+//|                                               ANON_Levels_v2.mq5 |
+//| Display only: levels, Ghost calls, Ω regime, Risk and Zen panel. |
+//| Mirrors anon/ghost.py, anon/omega.py and anon/risk.py.           |
+//| This indicator never places, modifies or closes orders.          |
+//+------------------------------------------------------------------+
+#property copyright   "ANON / BlackSlash"
+#property version     "2.00"
+#property description "ANON levels + Ghost / Ω / Risk / Zen panel (display only, never trades)"
+#property indicator_chart_window
+#property indicator_buffers 4
+#property indicator_plots   4
+
+#property indicator_label1  "Ω EMA fast"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDeepSkyBlue
+#property indicator_width1  1
+#property indicator_label2  "Ω EMA slow"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrOrange
+#property indicator_width2  1
+#property indicator_label3  "Ghost A call"
+#property indicator_type3   DRAW_ARROW
+#property indicator_color3  clrLime
+#property indicator_width3  2
+#property indicator_label4  "Ghost B call"
+#property indicator_type4   DRAW_ARROW
+#property indicator_color4  clrAqua
+#property indicator_width4  2
+
+//--- keep these defaults equal to anon/config.py (tests/test_mql5_parity.py checks it)
+input group "Levels (ใบส่งมอบ)"
+input double InpAZoneBot       = 83000.0;   // A bot / inv
+input double InpAZoneTop       = 83500.0;   // A top
+input double InpBInvRef        = 84400.0;   // B inv ref (อ้างอิง ไม่ใช่ entry/stop)
+input double InpGrayCenter     = 84700.0;   // เทา NO CHASE
+input double InpGrayHalf       = 150.0;     // ครึ่งความกว้างเทา (ต้องยืนยัน)
+input double InpTP1            = 85500.0;   // TP1
+input double InpLiqTop         = 87000.0;   // liq บน
+
+input group "Ghost"
+input double InpStopBuffer     = 50.0;      // stop = low ของ sweep/swing - ค่านี้
+input int    InpSwingLookback  = 6;         // แท่งที่ใช้หา swing low ของ B
+input int    InpBreakoutExpiry = 12;        // B armed ได้กี่แท่ง
+input double InpRetestTol      = 100.0;     // รีเทสได้สูงกว่าขอบเทาไม่เกิน
+input double InpMinRR          = 1.0;       // RR ขั้นต่ำ (ต้องยืนยัน)
+
+input group "Risk"
+input double InpLot            = 0.01;
+input double InpMaxLot         = 0.01;
+input double InpRiskPct        = 0.5;       // % ต่อไม้
+input double InpDailyPct       = 2.0;       // % ต่อวัน
+input double InpPeakWarnPct    = 5.0;       // เตือน DD จาก peak
+input long   InpVetoTicket     = 208190412; // ไม้หลุดแผน
+input long   InpBotMagic       = 7700700;   // magic ของ engine
+input bool   InpVetoUnmanaged  = true;      // มีไม้นอกระบบ = VETO
+input double InpDayUtcOffset   = 7.0;       // ตัดวันตามเวลาไทย
+
+input group "Ω"
+input int    InpEmaFast        = 20;
+input int    InpEmaSlow        = 50;
+input int    InpAtrPeriod      = 14;
+input double InpShockMult      = 3.0;
+input bool   InpOmegaVeto      = true;      // Ω ไม่เอื้อ = VETO (ต้องยืนยัน)
+
+input group "Display"
+input int    InpMarkerBars     = 500;       // ย้อนหลังกี่แท่งสำหรับลูกศร Ghost
+input bool   InpShowPanel      = true;
+input int    InpPanelX         = 10;
+input int    InpPanelY         = 25;
+input int    InpPanelWidth     = 470;
+input string InpFont           = "Tahoma";
+input int    InpFontSize       = 9;
+input color  InpClrAZone       = C'46,110,70';
+input color  InpClrGray        = C'105,105,105';
+input color  InpClrPanel       = C'22,24,32';
+input color  InpClrPanelBorder = C'70,74,90';
+input color  InpClrText        = C'225,228,235';
+input color  InpClrMuted       = C'150,155,170';
+input color  InpClrGood        = clrLimeGreen;
+input color  InpClrBad         = clrTomato;
+input color  InpClrWarn        = clrGold;
+
+#define PFX         "ANON2_"
+#define WINDOW_BARS 300   // same window the Python engine passes to Ghost/Ω
+
+struct GhostCall
+  {
+   int      setup;      // 0 none, 1 A, 2 B
+   string   variant;
+   double   entry;
+   double   stop;
+   double   rr;
+   string   reason;
+   datetime bar_time;
+  };
+
+struct RegimeInfo
+  {
+   string regime;
+   bool   favorable;
+   string reason;
+   double ema_fast;
+   double ema_slow;
+   double atr;
+  };
+
+double     BufEmaFast[], BufEmaSlow[], BufCallA[], BufCallB[];
+MqlRates   g_rates[];
+int        g_n = 0;
+datetime   g_last_h1 = 0;
+datetime   g_markers_for = 0;
+GhostCall  g_call;
+RegimeInfo g_regime;
+int        g_breakout = -1;
+double     g_b_swing_stop = 0.0;
+string     g_txt[];
+color      g_col[];
+int        g_lines = 0;
+int        g_prev_lines = 0;
+
+//+------------------------------------------------------------------+
+//| small helpers                                                    |
+//+------------------------------------------------------------------+
+int    IMax(const int a, const int b) { return a > b ? a : b; }
+int    IMin(const int a, const int b) { return a < b ? a : b; }
+double GrayLow()  { return InpGrayCenter - InpGrayHalf; }
+double GrayHigh() { return InpGrayCenter + InpGrayHalf; }
+int    LineHeight() { return InpFontSize * 2; }
+
+double RewardRisk(const double entry, const double stop, const double tp)
+  {
+   double risk = entry - stop;
+   if(risk <= 0.0)
+      return 0.0;
+   return (tp - entry) / risk;
+  }
+
+string Num(const double v, const int digits)
+  {
+   string s   = DoubleToString(MathAbs(v), digits);
+   int    dot = StringFind(s, ".");
+   string ip  = (dot < 0) ? s : StringSubstr(s, 0, dot);
+   string fp  = (dot < 0) ? "" : StringSubstr(s, dot);
+   string out = "";
+   int    len = StringLen(ip);
+   for(int i = 0; i < len; i++)
+     {
+      if(i > 0 && (len - i) % 3 == 0)
+         out += ",";
+      out += StringSubstr(ip, i, 1);
+     }
+   return (v < 0 ? "-" : "") + out + fp;
+  }
+
+string Px(const double v) { return Num(v, 1); }
+string Money(const double v) { return Num(v, 2); }
+
+//+------------------------------------------------------------------+
+//| Ghost — mirrors Ghost.evaluate in anon/ghost.py                  |
+//+------------------------------------------------------------------+
+int ArmedBreakout(const MqlRates &r[], const int i)
+  {
+   double gh = GrayHigh();
+   int lo = IMax(1, i - InpBreakoutExpiry);
+   for(int j = i; j >= lo; j--)
+     {
+      if(r[j].close <= gh)
+         return -1;
+      if(r[j - 1].close <= gh)
+         return j;
+     }
+   return -1;
+  }
+
+double SwingStop(const MqlRates &r[], const int i)
+  {
+   int from = IMax(0, i - InpSwingLookback + 1);
+   double lo = r[from].low;
+   for(int k = from + 1; k <= i; k++)
+      lo = MathMin(lo, r[k].low);
+   return lo - InpStopBuffer;
+  }
+
+void GhostEvaluate(const MqlRates &r[], const int i, GhostCall &c)
+  {
+   c.setup = 0;
+   c.variant = "";
+   c.entry = 0.0;
+   c.stop = 0.0;
+   c.rr = 0.0;
+   c.reason = "no_data";
+   c.bar_time = 0;
+   if(i < 0)
+      return;
+   c.bar_time = r[i].time;
+   double cl = r[i].close;
+   if(cl >= GrayLow() && cl <= GrayHigh())
+     {
+      c.reason = "inside_gray_no_chase";
+      return;
+     }
+   if(r[i].low <= InpAZoneTop && cl >= InpAZoneBot && cl < GrayLow())
+     {
+      c.setup = 1;
+      c.variant = (r[i].low < InpAZoneBot) ? "sweep_reclaim" : "zone";
+      c.stop = MathMin(r[i].low, InpAZoneBot) - InpStopBuffer;
+     }
+   else
+      if(cl > GrayHigh())
+        {
+         int j = ArmedBreakout(r, i);
+         if(j >= 0 && j < i && r[i].low <= GrayHigh() + InpRetestTol)
+           {
+            c.setup = 2;
+            c.variant = "breakout_retest";
+            c.stop = SwingStop(r, i);
+           }
+        }
+   if(c.setup == 0)
+     {
+      c.reason = "no_setup";
+      return;
+     }
+   string name = (c.setup == 1) ? "A" : "B";
+   c.entry = cl;
+   c.rr = RewardRisk(cl, c.stop, InpTP1);
+   if(c.entry >= InpTP1)
+     {
+      c.reason = name + ":entry_at_or_above_tp1";
+      c.setup = 0;
+      return;
+     }
+   if(c.rr < InpMinRR)
+     {
+      c.reason = name + ":rr_" + DoubleToString(c.rr, 2) + "_below_min";
+      c.setup = 0;
+      return;
+     }
+   c.reason = "call_" + name + "_" + c.variant;
+  }
+
+//+------------------------------------------------------------------+
+//| Ω — mirrors Omega.rule_tag in anon/omega.py                      |
+//+------------------------------------------------------------------+
+double EmaLast(const MqlRates &r[], const int from, const int to, const int period)
+  {
+   double k = 2.0 / (period + 1);
+   double e = r[from].close;
+   for(int i = from + 1; i <= to; i++)
+      e = e + k * (r[i].close - e);
+   return e;
+  }
+
+double AtrLast(const MqlRates &r[], const int from, const int to, const int period)
+  {
+   double a = 0.0, sum = 0.0;
+   for(int i = from; i <= to; i++)
+     {
+      double tr = r[i].high - r[i].low;
+      if(i > from)
+        {
+         double pc = r[i - 1].close;
+         tr = MathMax(tr, MathMax(MathAbs(r[i].high - pc), MathAbs(r[i].low - pc)));
+        }
+      int idx = i - from;
+      if(idx < period)
+        {
+         sum += tr;
+         a = sum / (idx + 1);
+        }
+      else
+         a = (a * (period - 1) + tr) / period;
+     }
+   return a;
+  }
+
+void RuleTag(const MqlRates &r[], const int n, RegimeInfo &g)
+  {
+   g.ema_fast = 0.0;
+   g.ema_slow = 0.0;
+   g.atr = 0.0;
+   int from = IMax(0, n - WINDOW_BARS);
+   if(n - from < InpEmaSlow + 1)
+     {
+      g.regime = "unknown";
+      g.favorable = false;
+      g.reason = "ข้อมูล H1 ไม่พอ (ต้องมี " + IntegerToString(InpEmaSlow + 1) + " แท่ง)";
+      return;
+     }
+   int last = n - 1;
+   g.ema_fast = EmaLast(r, from, last, InpEmaFast);
+   g.ema_slow = EmaLast(r, from, last, InpEmaSlow);
+   g.atr = AtrLast(r, from, last - 1, InpAtrPeriod);
+   double range = r[last].high - r[last].low;
+   double cl = r[last].close;
+   if(g.atr > 0.0 && range > InpShockMult * g.atr)
+     {
+      g.regime = "shock";
+      g.reason = "แท่งล่าสุดกว้าง " + Px(range) + " > " + DoubleToString(InpShockMult, 1) + "×ATR";
+     }
+   else
+      if(g.ema_fast > g.ema_slow && cl > g.ema_slow)
+        {
+         g.regime = "trend_up";
+         g.reason = "EMA เร็ว > EMA ช้า";
+        }
+      else
+         if(g.ema_fast < g.ema_slow && cl < g.ema_slow)
+           {
+            g.regime = "trend_down";
+            g.reason = "EMA เร็ว < EMA ช้า";
+           }
+         else
+           {
+            g.regime = "range";
+            g.reason = "EMA ปนกัน";
+           }
+   g.favorable = (g.regime == "trend_up" || g.regime == "range");
+  }
+
+//+------------------------------------------------------------------+
+//| data refresh on each new closed H1 bar                           |
+//+------------------------------------------------------------------+
+void RefreshH1()
+  {
+   ArraySetAsSeries(g_rates, false);
+   int got = CopyRates(_Symbol, PERIOD_H1, 1, WINDOW_BARS + InpMarkerBars, g_rates);
+   g_n = (got > 0) ? got : 0;
+   if(g_n < 2)
+      return;
+   GhostEvaluate(g_rates, g_n - 1, g_call);
+   RuleTag(g_rates, g_n, g_regime);
+   g_breakout = (g_rates[g_n - 1].close > GrayHigh()) ? ArmedBreakout(g_rates, g_n - 1) : -1;
+   g_b_swing_stop = SwingStop(g_rates, g_n - 1);
+  }
+
+bool CheckNewH1()
+  {
+   datetime t = iTime(_Symbol, PERIOD_H1, 1);
+   if(t == 0 || (t == g_last_h1 && g_n >= 2))
+      return false;
+   g_last_h1 = t;
+   RefreshH1();
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| chart objects                                                    |
+//+------------------------------------------------------------------+
+void Tag(const string id, const double price, const color clr, const string text)
+  {
+   string name = PFX + "T_" + id;
+   datetime t = iTime(_Symbol, _Period, 0) + PeriodSeconds(_Period) * 2;
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+   ObjectMove(0, name, 0, t, price);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_FONT, InpFont);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+void HLine(const string id, const double price, const color clr, const ENUM_LINE_STYLE style,
+           const int width, const string text)
+  {
+   string name = PFX + id;
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, text);
+   Tag(id, price, clr, text);
+  }
+
+void Band(const string id, const double p1, const double p2, const color clr, const string text)
+  {
+   string name = PFX + id;
+   int bars = Bars(_Symbol, _Period);
+   datetime t1 = iTime(_Symbol, _Period, IMax(0, IMin(bars - 1, 5000)));
+   datetime t2 = iTime(_Symbol, _Period, 0) + PeriodSeconds(_Period) * 60;
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
+   ObjectMove(0, name, 0, t1, p1);
+   ObjectMove(0, name, 1, t2, p2);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FILL, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, text);
+   Tag(id, p2, clr, text);
+  }
+
+void Remove(const string id)
+  {
+   ObjectDelete(0, PFX + id);
+   ObjectDelete(0, PFX + "T_" + id);
+  }
+
+double BMaxEntry(const double stop)
+  {
+   return (InpTP1 + InpMinRR * stop) / (1.0 + InpMinRR);
+  }
+
+void DrawLevels()
+  {
+   Band("AZONE", InpAZoneBot, InpAZoneTop, InpClrAZone,
+        "A โซน " + Px(InpAZoneBot) + "–" + Px(InpAZoneTop));
+   Band("GRAY", GrayLow(), GrayHigh(), InpClrGray,
+        "เทา NO CHASE " + Px(GrayLow()) + "–" + Px(GrayHigh()));
+   HLine("ASTOP", InpAZoneBot - InpStopBuffer, InpClrBad, STYLE_DASH, 1,
+         "A hard stop (โซน) " + Px(InpAZoneBot - InpStopBuffer) + " · sweep ใช้ low−" + Px(InpStopBuffer));
+   HLine("BREF", InpBInvRef, InpClrMuted, STYLE_DOT, 1,
+         "B ref " + Px(InpBInvRef) + " (อ้างอิง ไม่ใช่ entry/stop)");
+   HLine("TP1", InpTP1, clrDodgerBlue, STYLE_SOLID, 2, "TP1 " + Px(InpTP1));
+   HLine("LIQ", InpLiqTop, clrDarkOrange, STYLE_DASH, 1, "liq บน " + Px(InpLiqTop));
+
+   if(g_call.setup != 0)
+      HLine("CALLSTOP", g_call.stop, clrMagenta, STYLE_DASH, 2,
+            "Ghost " + (g_call.setup == 1 ? "A" : "B") + " stop " + Px(g_call.stop));
+   else
+      Remove("CALLSTOP");
+
+   if(g_breakout >= 0)
+     {
+      HLine("BSWING", g_b_swing_stop, clrMagenta, STYLE_DOT, 1, "B swing stop " + Px(g_b_swing_stop));
+      HLine("BMAX", BMaxEntry(g_b_swing_stop), clrAqua, STYLE_DOT, 1,
+            "B เข้าได้ไม่เกิน " + Px(BMaxEntry(g_b_swing_stop)) + " (RR≥" + DoubleToString(InpMinRR, 1) + ")");
+     }
+   else
+     {
+      Remove("BSWING");
+      Remove("BMAX");
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| panel                                                            |
+//+------------------------------------------------------------------+
+void Line(const string s, const color c)
+  {
+   ArrayResize(g_txt, g_lines + 1);
+   ArrayResize(g_col, g_lines + 1);
+   g_txt[g_lines] = s;
+   g_col[g_lines] = c;
+   g_lines++;
+  }
+
+void PanelBg(const int lines)
+  {
+   string name = PFX + "BG";
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, InpPanelWidth);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, 12 + lines * LineHeight());
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpClrPanel);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpClrPanelBorder);
+  }
+
+void RenderPanel()
+  {
+   PanelBg(g_lines);
+   for(int i = 0; i < g_lines; i++)
+     {
+      string name = PFX + "P" + IntegerToString(i);
+      if(ObjectFind(0, name) < 0)
+        {
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+        }
+      ObjectSetString(0, name, OBJPROP_FONT, InpFont);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + 8);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + 6 + i * LineHeight());
+      ObjectSetString(0, name, OBJPROP_TEXT, g_txt[i]);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, g_col[i]);
+     }
+   for(int i = g_lines; i < g_prev_lines; i++)
+      ObjectDelete(0, PFX + "P" + IntegerToString(i));
+   g_prev_lines = g_lines;
+  }
+
+// Loss in account currency for InpLot between two prices (tick value, so no trade functions needed).
+double RiskMoney(const double entry, const double stop)
+  {
+   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tick_value <= 0.0)
+      tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tick_size <= 0.0 || tick_value <= 0.0)
+      return -1.0;
+   return MathAbs(entry - stop) / tick_size * tick_value * InpLot;
+  }
+
+double DayStartBalance(const double balance)
+  {
+   long server_offset = (long)(TimeTradeServer() - TimeGMT());
+   server_offset = (long)MathRound(server_offset / 900.0) * 900;
+   long day_offset = (long)(InpDayUtcOffset * 3600.0);
+   long local = (long)TimeGMT() + day_offset;
+   long day_start_local = local - (local % 86400);
+   datetime from = (datetime)(day_start_local - day_offset + server_offset);
+   double realized = 0.0;
+   if(HistorySelect(from, TimeTradeServer() + 3600))
+     {
+      int total = HistoryDealsTotal();
+      for(int i = 0; i < total; i++)
+        {
+         ulong t = HistoryDealGetTicket(i);
+         if(t == 0)
+            continue;
+         long type = HistoryDealGetInteger(t, DEAL_TYPE);
+         if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+            continue;
+         realized += HistoryDealGetDouble(t, DEAL_PROFIT) + HistoryDealGetDouble(t, DEAL_COMMISSION)
+                     + HistoryDealGetDouble(t, DEAL_SWAP) + HistoryDealGetDouble(t, DEAL_FEE);
+        }
+     }
+   return balance - realized;
+  }
+
+string Verdict(const bool ok) { return ok ? "ผ่าน" : "ไม่ผ่าน"; }
+
+void BuildPanel()
+  {
+   g_lines = 0;
+   string ccy = AccountInfoString(ACCOUNT_CURRENCY);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   string vetoes = "";
+
+   //--- header
+   datetime h1_open = iTime(_Symbol, PERIOD_H1, 0);
+   long left = (long)(h1_open + 3600 - TimeTradeServer());
+   if(left < 0)
+      left = 0;
+   Line("ANON · " + _Symbol + " · H1 ถัดไปปิดใน " + StringFormat("%02d:%02d", (int)(left / 60), (int)(left % 60)),
+        InpClrText);
+   Line("bid " + Px(bid) + " / ask " + Px(ask) + " · spread " + Px(ask - bid), InpClrMuted);
+   if(g_n < 2)
+     {
+      Line("กำลังโหลดประวัติ H1 ...", InpClrWarn);
+      RenderPanel();
+      return;
+     }
+
+   double last_close = g_rates[g_n - 1].close;
+   bool inside = (last_close >= GrayLow() && last_close <= GrayHigh());
+   string where = inside ? "ในเทา → NO CHASE" : (last_close < GrayLow() ? "ใต้เทา" : "เหนือเทา");
+   Line("H1 ปิดล่าสุด " + Px(last_close) + " (" + TimeToString(g_rates[g_n - 1].time, TIME_DATE | TIME_MINUTES)
+        + ") · " + where, inside ? InpClrWarn : InpClrText);
+   if(inside)
+      vetoes += "เทา NO CHASE, ";
+
+   //--- Ghost
+   Line("── Ghost ──", InpClrMuted);
+   double rr_now = 0.0;
+   if(g_call.setup != 0)
+     {
+      rr_now = RewardRisk(ask, g_call.stop, InpTP1);
+      Line("เรียก " + (g_call.setup == 1 ? "A/" : "B/") + g_call.variant + " · เข้า(ask) " + Px(ask) + " · หยุด "
+           + Px(g_call.stop) + " · TP1 " + Px(InpTP1) + " · RR " + DoubleToString(rr_now, 2), InpClrGood);
+      if(g_call.setup == 1)
+         Line("thesis exit: ถ้า H1 ปิด < " + Px(InpAZoneBot) + " ให้ออก", InpClrMuted);
+      if(rr_now < InpMinRR || ask >= InpTP1)
+         vetoes += "RR หลัง spread ต่ำ, ";
+     }
+   else
+     {
+      Line("ไม่เรียก: " + g_call.reason, InpClrMuted);
+      if(!inside)
+         vetoes += "Ghost ยังไม่เรียก, ";
+     }
+   if(g_breakout >= 0)
+      Line("B armed ตั้งแต่ " + TimeToString(g_rates[g_breakout].time, TIME_DATE | TIME_MINUTES) + " · รีเทส low ≤ "
+           + Px(GrayHigh() + InpRetestTol) + " · swing stop " + Px(g_b_swing_stop) + " · เข้าได้ไม่เกิน "
+           + Px(BMaxEntry(g_b_swing_stop)), InpClrText);
+   else
+      Line("B ยังไม่ armed (ต้องมี H1 ปิด > " + Px(GrayHigh()) + " แล้วรีเทส)", InpClrMuted);
+
+   //--- Ω
+   Line("── Ω ──", InpClrMuted);
+   Line("Ω " + g_regime.regime + " → " + (g_regime.favorable ? "เอื้อ" : "ไม่เอื้อ") + " · " + g_regime.reason
+        + " · EMA" + IntegerToString(InpEmaFast) + " " + Px(g_regime.ema_fast) + " / EMA" + IntegerToString(InpEmaSlow)
+        + " " + Px(g_regime.ema_slow) + " · ATR " + Px(g_regime.atr),
+        g_regime.favorable ? InpClrGood : InpClrBad);
+   if(g_call.setup != 0 && !g_regime.favorable && InpOmegaVeto)
+      vetoes += "Ω ไม่เอื้อ, ";
+
+   //--- Risk
+   Line("── Risk (lot " + DoubleToString(InpLot, 2) + ") ──", InpClrMuted);
+   double pp = RiskMoney(ask + 1.0, ask);
+   double cap_trade = equity * InpRiskPct / 100.0;
+   string max_stop = (pp > 0.0) ? Px(cap_trade / pp) : "?";
+   Line("equity " + Money(equity) + " " + ccy + " · 1 จุด = " + Money(pp) + " " + ccy + " · stop ไกลสุด "
+        + max_stop + " จุด (≤" + DoubleToString(InpRiskPct, 1) + "%)", InpClrText);
+
+   double trade_risk = 0.0;
+   if(g_call.setup != 0)
+     {
+      trade_risk = RiskMoney(ask, g_call.stop);
+      double pct = equity > 0 ? trade_risk / equity * 100.0 : 0.0;
+      bool ok = trade_risk >= 0.0 && pct <= InpRiskPct + 1e-9;
+      Line("ไม้ที่เรียก: เสี่ยง " + Money(trade_risk) + " " + ccy + " = " + DoubleToString(pct, 2) + "% → " + Verdict(ok),
+           ok ? InpClrGood : InpClrBad);
+      if(!ok)
+         vetoes += "เสี่ยงเกิน " + DoubleToString(InpRiskPct, 1) + "%, ";
+     }
+   else
+     {
+      double spread = ask - bid;
+      double a_entry = InpAZoneTop + spread;
+      double a_stop = InpAZoneBot - InpStopBuffer;
+      double a_risk = RiskMoney(a_entry, a_stop);
+      double a_pct = equity > 0 ? a_risk / equity * 100.0 : 0.0;
+      Line("A อ้างอิง (เข้า " + Px(a_entry) + " หยุด " + Px(a_stop) + "): เสี่ยง " + Money(a_risk) + " " + ccy + " = "
+           + DoubleToString(a_pct, 2) + "% · RR " + DoubleToString(RewardRisk(a_entry, a_stop, InpTP1), 2),
+           a_pct <= InpRiskPct ? InpClrMuted : InpClrWarn);
+     }
+
+   double day_start = DayStartBalance(balance);
+   double cap_day = day_start * InpDailyPct / 100.0;
+   double lost = MathMax(0.0, day_start - equity);
+   bool day_ok = lost < cap_day && lost + trade_risk <= cap_day + 1e-9;
+   Line("วันนี้ขาดทุน " + Money(lost) + " / เพดาน " + Money(cap_day) + " " + ccy + " (" + DoubleToString(InpDailyPct, 1)
+        + "%) → " + Verdict(day_ok), day_ok ? InpClrText : InpClrBad);
+   if(lost >= cap_day)
+      vetoes += "ชนเพดานวัน, ";
+   else
+      if(!day_ok)
+         vetoes += "ไม้นี้จะทะลุเพดานวัน, ";
+
+   string gv = "ANON_PEAK_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+   double peak = GlobalVariableCheck(gv) ? GlobalVariableGet(gv) : 0.0;
+   peak = MathMax(peak, MathMax(equity, day_start));
+   GlobalVariableSet(gv, peak);
+   double dd = peak > 0 ? (peak - equity) / peak * 100.0 : 0.0;
+   Line("peak " + Money(peak) + " · DD " + DoubleToString(dd, 2) + "% (เตือนที่ " + DoubleToString(InpPeakWarnPct, 1) + "%)",
+        dd >= InpPeakWarnPct ? InpClrWarn : InpClrText);
+
+   int shown = 0;
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      long type = PositionGetInteger(POSITION_TYPE);
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      double sl = PositionGetDouble(POSITION_SL);
+      string side = (type == POSITION_TYPE_BUY) ? "buy" : "sell";
+      string desc = "#" + IntegerToString((long)ticket) + " " + side + " " + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2)
+                    + " · P/L " + Money(PositionGetDouble(POSITION_PROFIT));
+      color c = InpClrText;
+      if((long)ticket == InpVetoTicket)
+        {
+         desc += " → VETO (หลุดแผน ห้ามนับ แต่ Risk นับ)";
+         c = InpClrBad;
+         vetoes += "VETO #" + IntegerToString(InpVetoTicket) + " เปิดอยู่, ";
+        }
+      else
+         if(magic != InpBotMagic)
+           {
+            desc += " → ไม้นอกระบบ";
+            c = InpClrBad;
+            if(InpVetoUnmanaged)
+               vetoes += "มีไม้นอกระบบ, ";
+           }
+         else
+           {
+            desc += " · ตามแผน SL " + (sl > 0 ? Px(sl) : "ไม่มี!");
+            c = (sl > 0) ? InpClrGood : InpClrBad;
+            vetoes += "มีไม้ตามแผนเปิดอยู่, ";
+           }
+      if(type == POSITION_TYPE_SELL)
+         vetoes += "มี sell เปิด (ห้าม hedge), ";
+      Line("ไม้เปิด " + desc, c);
+      shown++;
+     }
+   if(shown == 0)
+      Line("ไม่มีไม้เปิดบน " + _Symbol, InpClrMuted);
+   if(InpLot > InpMaxLot)
+      vetoes += "lot เกินเพดาน, ";
+
+   //--- Zen
+   Line("── Zen checklist ──", InpClrMuted);
+   bool z1 = (g_call.setup != 0 && !inside);
+   bool z2 = (g_call.setup != 0 && InpLot <= InpMaxLot && g_call.stop > 0 && trade_risk >= 0.0
+              && equity > 0 && trade_risk / equity * 100.0 <= InpRiskPct + 1e-9);
+   Line("(1) Ghost เรียกนอกเทา: " + Verdict(z1), z1 ? InpClrGood : InpClrBad);
+   Line("(2) lot " + DoubleToString(InpLot, 2) + " + stop ตัวเลข + ไม่เกินเพดาน: " + Verdict(z2), z2 ? InpClrGood : InpClrBad);
+   Line("(3) พร้อม #Txx / ตัวนับหลุดแผน / พักหลังขาดทุน: ดูใน engine", InpClrMuted);
+
+   //--- verdict
+   Line("── สรุป ──", InpClrMuted);
+   if(StringLen(vetoes) > 0)
+     {
+      vetoes = StringSubstr(vetoes, 0, StringLen(vetoes) - 2);
+      Line("ห้ามกด: " + vetoes, InpClrBad);
+     }
+   else
+      Line("ผ่านเช็กฝั่งกราฟ → ให้ engine เช็ก Zen + รออนุมัติ", InpClrGood);
+   Line("ลูกศร = จุดที่ Ghost เรียก (ก่อนผ่าน Ω/Risk/Zen) · อินดิเคเตอร์นี้ไม่ส่งออเดอร์", InpClrMuted);
+   RenderPanel();
+  }
+
+//+------------------------------------------------------------------+
+//| indicator events                                                 |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   if(InpGrayHalf <= 0.0 || !(InpAZoneBot < InpAZoneTop && InpAZoneTop < GrayLow() && GrayHigh() < InpTP1))
+     {
+      Print("ANON: ระดับราคาต้องเรียง A bot < A top < เทา < TP1 และความกว้างเทา > 0");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpMinRR <= 0.0 || InpMarkerBars < 0 || InpEmaFast < 1 || InpEmaSlow < 1 || InpAtrPeriod < 1)
+     {
+      Print("ANON: ค่า Ghost/Ω ไม่ถูกต้อง");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   g_n = 0;
+   g_last_h1 = 0;
+   g_markers_for = 0;
+   g_prev_lines = 0;
+   g_breakout = -1;
+   g_b_swing_stop = 0.0;
+   g_call.setup = 0;
+   g_call.reason = "no_data";
+   g_regime.regime = "unknown";
+   g_regime.favorable = false;
+   SetIndexBuffer(0, BufEmaFast, INDICATOR_DATA);
+   SetIndexBuffer(1, BufEmaSlow, INDICATOR_DATA);
+   SetIndexBuffer(2, BufCallA, INDICATOR_DATA);
+   SetIndexBuffer(3, BufCallB, INDICATOR_DATA);
+   for(int i = 0; i < 4; i++)
+      PlotIndexSetDouble(i, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+   PlotIndexSetInteger(2, PLOT_ARROW, 233);
+   PlotIndexSetInteger(3, PLOT_ARROW, 233);
+   PlotIndexSetString(0, PLOT_LABEL, "Ω EMA" + IntegerToString(InpEmaFast));
+   PlotIndexSetString(1, PLOT_LABEL, "Ω EMA" + IntegerToString(InpEmaSlow));
+   IndicatorSetString(INDICATOR_SHORTNAME, "ANON_Levels_v2");
+   IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+   if(InpShowPanel)
+      PanelBg(1);
+   EventSetTimer(1);
+   return INIT_SUCCEEDED;
+  }
+
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+   ObjectsDeleteAll(0, PFX);
+   ChartRedraw();
+  }
+
+void OnTimer()
+  {
+   CheckNewH1();
+   DrawLevels();
+   if(InpShowPanel)
+      BuildPanel();
+   ChartRedraw();
+  }
+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+  {
+   if(rates_total < 2)
+      return 0;
+   bool fresh = CheckNewH1() || prev_calculated == 0;
+   bool is_h1 = (_Period == PERIOD_H1);
+   double kf = 2.0 / (InpEmaFast + 1);
+   double ks = 2.0 / (InpEmaSlow + 1);
+   int start = (prev_calculated == 0) ? 0 : prev_calculated - 1;
+   for(int i = start; i < rates_total; i++)
+     {
+      BufCallA[i] = EMPTY_VALUE;
+      BufCallB[i] = EMPTY_VALUE;
+      if(!is_h1)
+        {
+         BufEmaFast[i] = EMPTY_VALUE;
+         BufEmaSlow[i] = EMPTY_VALUE;
+         continue;
+        }
+      if(i == 0)
+        {
+         BufEmaFast[i] = close[i];
+         BufEmaSlow[i] = close[i];
+        }
+      else
+        {
+         BufEmaFast[i] = BufEmaFast[i - 1] + kf * (close[i] - BufEmaFast[i - 1]);
+         BufEmaSlow[i] = BufEmaSlow[i - 1] + ks * (close[i] - BufEmaSlow[i - 1]);
+        }
+     }
+
+   if(is_h1 && g_n >= 2 && (fresh || g_markers_for != g_last_h1))
+     {
+      g_markers_for = g_last_h1;
+      GhostCall c;
+      int first = IMax(0, g_n - InpMarkerBars);
+      for(int k = first; k < g_n; k++)
+        {
+         GhostEvaluate(g_rates, k, c);
+         if(c.setup == 0)
+            continue;
+         int shift = iBarShift(_Symbol, PERIOD_H1, g_rates[k].time, true);
+         if(shift < 0)
+            continue;
+         int idx = rates_total - 1 - shift;
+         if(idx < 0 || idx >= rates_total)
+            continue;
+         double offset = (high[idx] - low[idx]) * 0.5 + 10 * _Point;
+         if(c.setup == 1)
+            BufCallA[idx] = low[idx] - offset;
+         else
+            BufCallB[idx] = low[idx] - offset;
+        }
+     }
+   return rates_total;
+  }
+//+------------------------------------------------------------------+
