@@ -5,6 +5,7 @@ sync broker → manage open plan trade → Ghost → Ω → Risk → Zen → app
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -14,7 +15,7 @@ from anon.autolevels import draw_levels
 from anon.broker.base import Broker
 from anon.config import Config
 from anon.ghost import Ghost, reprice
-from anon.models import Bar, ClosedTrade, Position
+from anon.models import Bar, ClosedTrade, Position, Signal
 from anon.omega import AIReviewer, Omega
 from anon.quant import Journal, TradeRecord, realized_r
 from anon.risk import Risk, RiskContext
@@ -32,6 +33,19 @@ class EngineEvent:
 
     def __str__(self) -> str:
         return f"{self.time:%Y-%m-%d %H:%M} [{self.kind}] {self.detail}"
+
+
+@dataclass(frozen=True)
+class CallMark:
+    """A Ghost call and what the pipeline did with it (the last event it produced)."""
+
+    bar_time: datetime
+    setup: str
+    entry: float
+    stop: float
+    tp1: float
+    outcome: str
+    detail: str
 
 
 class Engine:
@@ -52,6 +66,7 @@ class Engine:
         self.omega = Omega(cfg.levels, cfg.omega, ai)
         self.levels_day: str | None = None  # auto mode: local day the current levels were drawn for
         self.levels_ok = not cfg.auto.enabled
+        self.calls: deque[CallMark] = deque(maxlen=200)
         self.risk = Risk(cfg.risk)
         self.zen = Zen(cfg.zen)
         self.magic = cfg.execution.magic
@@ -256,7 +271,13 @@ class Engine:
             "ghost",
             f"call {sig.setup}/{sig.variant} entry {sig.entry:.1f} stop {sig.stop:.1f} tp1 {sig.tp1:.0f} rr {sig.rr:.2f}",
         )
+        mark = len(self.events)
+        self._decide(sig, bars, now)
+        last = self.events[-1] if len(self.events) > mark else EngineEvent(now, "none", "")
+        self.calls.append(CallMark(sig.bar_time, sig.setup, sig.entry, sig.stop, sig.tp1, last.kind, last.detail))
 
+    def _decide(self, sig: Signal, bars: Sequence[Bar], now: datetime) -> None:
+        """Ω → Risk → Zen → approval → order for one Ghost call."""
         tag = self.omega.tag(bars, sig)
         if not tag.favorable:
             self._emit(now, "omega", f"ไม่เอื้อ ({tag.regime}): {tag.reason}")

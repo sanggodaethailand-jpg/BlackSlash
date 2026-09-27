@@ -115,6 +115,7 @@ class ExecutionConfig:
     journal_path: str = "journal/anon_journal.jsonl"
     state_path: str = "state/anon_state.json"
     usdthb: float | None = None  # only for THB on real P/L; never used to forecast
+    chart_feed: str = "auto"  # engine → chart file; "auto" = MT5 Common\Files, "" = off
 
 
 @dataclass(frozen=True)

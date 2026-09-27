@@ -81,6 +81,15 @@ input color  InpClrGood        = clrLimeGreen;
 input color  InpClrBad         = clrTomato;
 input color  InpClrWarn        = clrGold;
 
+input group "Engine (Python) บนกราฟ"
+input bool   InpShowEngine     = true;              // แสดงสิ่งที่ engine ทำ (ไฟล์จาก run.bat)
+input string InpFeedFile       = "ANON_feed.txt";   // ใน Common\Files ของ MT5
+input int    InpFeedMaxAgeSec  = 120;               // เกินนี้ถือว่า engine หยุดทำงาน
+input int    InpFeedEvents     = 4;                 // จำนวนเหตุการณ์ล่าสุดในแผง
+input color  InpClrEngineBuy   = clrLime;           // ลูกศร: engine จะกด (dry-run/order)
+input color  InpClrEngineVeto  = clrOrange;         // ลูกศร: เรียกแล้วแต่โดน veto
+input color  InpClrAutoLevels  = clrAqua;           // เส้นระดับอัตโนมัติจาก engine
+
 #define PFX         "ANON2_"
 #define WINDOW_BARS 300   // same window the Python engine passes to Ghost/Ω
 
@@ -542,6 +551,202 @@ double DayStartBalance(const double balance)
 
 string Verdict(const bool ok) { return ok ? "ผ่าน" : "ไม่ผ่าน"; }
 
+//+------------------------------------------------------------------+
+//| engine feed: what the Python engine is doing (anon/chartfeed.py) |
+//+------------------------------------------------------------------+
+string g_feed_lines[];
+int    g_feed_n = 0;
+
+bool ReadFeed()
+  {
+   g_feed_n = 0;
+   int h = FileOpen(InpFeedFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    '\t', CP_UTF8);
+   if(h == INVALID_HANDLE)
+      return false;
+   while(!FileIsEnding(h))
+     {
+      string s = FileReadString(h);
+      StringTrimRight(s);
+      if(StringLen(s) == 0)
+         continue;
+      ArrayResize(g_feed_lines, g_feed_n + 1);
+      g_feed_lines[g_feed_n] = s;
+      g_feed_n++;
+     }
+   FileClose(h);
+   return g_feed_n > 0;
+  }
+
+string FeedGet(const string key)
+  {
+   string prefix = key + "=";
+   int pl = StringLen(prefix);
+   for(int i = 0; i < g_feed_n; i++)
+      if(StringSubstr(g_feed_lines[i], 0, pl) == prefix)
+         return StringSubstr(g_feed_lines[i], pl);
+   return "";
+  }
+
+int FeedAll(const string key, string &out[])
+  {
+   string prefix = key + "=";
+   int pl = StringLen(prefix);
+   int n = 0;
+   ArrayResize(out, 0);
+   for(int i = 0; i < g_feed_n; i++)
+      if(StringSubstr(g_feed_lines[i], 0, pl) == prefix)
+        {
+         ArrayResize(out, n + 1);
+         out[n] = StringSubstr(g_feed_lines[i], pl);
+         n++;
+        }
+   return n;
+  }
+
+long FeedAgeSec()
+  {
+   string hb = FeedGet("heartbeat");
+   if(StringLen(hb) == 0)
+      return 999999;
+   return (long)TimeGMT() - StringToInteger(hb);
+  }
+
+bool FeedFresh()
+  {
+   long age = FeedAgeSec();
+   return g_feed_n > 0 && age >= -60 && age <= InpFeedMaxAgeSec;
+  }
+
+string AgeText(const long age)
+  {
+   if(age < 60)
+      return IntegerToString(age < 0 ? 0 : age) + " วิ";
+   if(age < 3600)
+      return IntegerToString(age / 60) + " นาที";
+   return IntegerToString(age / 3600) + " ชม.";
+  }
+
+long ServerOffsetSec()
+  {
+   long off = (long)(TimeTradeServer() - TimeGMT());
+   return (long)MathRound(off / 900.0) * 900;
+  }
+
+string ThaiClock(const long epoch_utc)
+  {
+   return TimeToString((datetime)(epoch_utc + (long)(InpDayUtcOffset * 3600.0)), TIME_MINUTES);
+  }
+
+void EngineMarker(const string id, const datetime t, const double price, const color clr, const string tip)
+  {
+   string name = PFX + "EC_" + id;
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_ARROW_BUY, 0, t, price);
+   ObjectMove(0, name, 0, t, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+  }
+
+void DrawEngine()
+  {
+   string ids[5] = {"EA_ABOT", "EA_ATOP", "EA_GRAYL", "EA_GRAYH", "EA_TP1"};
+   bool auto_levels = FeedFresh() && FeedGet("levels_source") == "auto" && FeedGet("levels_ok") == "1";
+   if(auto_levels)
+     {
+      HLine(ids[0], StringToDouble(FeedGet("a_bot")), InpClrAutoLevels, STYLE_DASHDOT, 1, "AUTO A ล่าง " + Px(StringToDouble(FeedGet("a_bot"))));
+      HLine(ids[1], StringToDouble(FeedGet("a_top")), InpClrAutoLevels, STYLE_DASHDOT, 1, "AUTO A บน " + Px(StringToDouble(FeedGet("a_top"))));
+      HLine(ids[2], StringToDouble(FeedGet("gray_low")), InpClrAutoLevels, STYLE_DOT, 1, "AUTO เทา ล่าง " + Px(StringToDouble(FeedGet("gray_low"))));
+      HLine(ids[3], StringToDouble(FeedGet("gray_high")), InpClrAutoLevels, STYLE_DOT, 1, "AUTO เทา บน " + Px(StringToDouble(FeedGet("gray_high"))));
+      HLine(ids[4], StringToDouble(FeedGet("tp1")), InpClrAutoLevels, STYLE_DASHDOT, 2, "AUTO TP1 " + Px(StringToDouble(FeedGet("tp1"))));
+     }
+   else
+      for(int i = 0; i < 5; i++)
+         Remove(ids[i]);
+
+   if(g_feed_n == 0 || FeedGet("symbol") != _Symbol)
+      return;
+   string calls[];
+   int n = FeedAll("call", calls);
+   long offset = ServerOffsetSec();
+   for(int i = 0; i < n; i++)
+     {
+      string f[];
+      if(StringSplit(calls[i], '|', f) < 6)
+         continue;
+      long t = StringToInteger(f[0]);
+      string outcome = f[5];
+      bool would_buy = (outcome == "dry_run" || outcome == "order");
+      string tip = "engine " + f[1] + " · " + outcome + " · เข้า " + f[2] + " · หยุด " + f[3] + " · TP1 " + f[4];
+      EngineMarker(f[0] + "_" + f[1], (datetime)(t + offset), StringToDouble(f[2]),
+                   would_buy ? InpClrEngineBuy : InpClrEngineVeto, tip);
+     }
+  }
+
+void EnginePanel()
+  {
+   Line("── Engine (Python) ──", InpClrMuted);
+   if(g_feed_n == 0)
+     {
+      Line("ยังไม่เชื่อมต่อ — เปิด run.bat ทิ้งไว้ แล้ว engine จะส่งข้อมูลขึ้นกราฟเอง", InpClrWarn);
+      return;
+     }
+   long age = FeedAgeSec();
+   bool fresh = FeedFresh();
+   string mode = FeedGet("mode");
+   Line((fresh ? "เชื่อมต่อแล้ว" : "ขาดการติดต่อ") + " · " + mode + " · " + FeedGet("symbol") + " · ระดับ " + FeedGet("levels_source")
+        + " · AI " + FeedGet("ai") + " · อัปเดต " + AgeText(age) + "ก่อน",
+        !fresh ? InpClrBad : (mode == "LIVE" ? InpClrWarn : InpClrGood));
+   if(FeedGet("symbol") != _Symbol)
+      Line("engine ดู " + FeedGet("symbol") + " แต่กราฟนี้คือ " + _Symbol + " — ลูกศร engine จะไม่แสดง", InpClrWarn);
+   if(FeedGet("levels_source") == "auto" && FeedGet("levels_ok") != "1")
+      Line("ระดับอัตโนมัติ: วันนี้ไม่วาดเส้น (กรอบแคบ/ข้อมูลไม่พอ) → ไม่เทรดวันนี้", InpClrWarn);
+
+   bool locked = FeedGet("zen_locked") == "1";
+   long cooldown = StringToInteger(FeedGet("zen_cooldown"));
+   string zen = "Zen: หลุดแผน " + FeedGet("zen_off_plan") + "/" + FeedGet("zen_max") + " · " + (locked ? "ล็อกวันนี้" : "ไม่ล็อก");
+   if(cooldown > 0)
+      zen += " · พักหลังขาดทุนอีก " + IntegerToString(cooldown) + " แท่ง";
+   Line(zen, locked ? InpClrBad : InpClrText);
+
+   long qn = StringToInteger(FeedGet("quant_n"));
+   if(qn > 0)
+      Line("Quant: n=" + IntegerToString(qn) + " · win " + FeedGet("quant_win") + "% · E[R] " + FeedGet("quant_er"),
+           StringToDouble(FeedGet("quant_er")) > 0 ? InpClrGood : InpClrBad);
+   else
+      Line("Quant: n=0 — ยังไม่มีไม้ตามแผนที่ปิด (ห้ามสรุป)", InpClrMuted);
+
+   string open_trade = FeedGet("open");
+   if(StringLen(open_trade) > 0)
+     {
+      string f[];
+      if(StringSplit(open_trade, '|', f) >= 5)
+         Line("ไม้เปิด " + f[0] + " " + f[1] + " · เข้า " + f[2] + " · หยุด " + f[3] + " · TP1 " + f[4], InpClrGood);
+     }
+
+   string events[];
+   int n = FeedAll("event", events);
+   for(int i = IMax(0, n - InpFeedEvents); i < n; i++)
+     {
+      string f[];
+      if(StringSplit(events[i], '|', f) < 3)
+         continue;
+      string text = ThaiClock(StringToInteger(f[0])) + " [" + f[1] + "] " + f[2];
+      if(StringLen(text) > 78)
+         text = StringSubstr(text, 0, 75) + "...";
+      color c = InpClrMuted;
+      if(f[1] == "dry_run" || f[1] == "order")
+         c = InpClrGood;
+      else
+         if(f[1] == "omega" || f[1] == "risk_veto" || f[1] == "zen_block" || f[1] == "off_plan")
+            c = InpClrWarn;
+      Line(text, c);
+     }
+  }
+
 void BuildPanel()
   {
    g_lines = 0;
@@ -723,7 +928,9 @@ void BuildPanel()
      }
    else
       Line("ผ่านเช็กฝั่งกราฟ → ให้ engine เช็ก Zen + รออนุมัติ", InpClrGood);
-   Line("ลูกศร = จุดที่ Ghost เรียก (ก่อนผ่าน Ω/Risk/Zen) · อินดิเคเตอร์นี้ไม่ส่งออเดอร์", InpClrMuted);
+   if(InpShowEngine)
+      EnginePanel();
+   Line("ลูกศรใต้แท่ง = Ghost ของกราฟ · ป้าย Buy เขียว/ส้ม = engine จะกด/โดน veto · ไม่ส่งออเดอร์", InpClrMuted);
    RenderPanel();
   }
 
@@ -781,6 +988,11 @@ void OnTimer()
   {
    CheckNewH1();
    DrawLevels();
+   if(InpShowEngine)
+     {
+      ReadFeed();
+      DrawEngine();
+     }
    if(InpShowPanel)
       BuildPanel();
    ChartRedraw();

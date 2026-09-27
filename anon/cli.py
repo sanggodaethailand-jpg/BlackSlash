@@ -170,6 +170,14 @@ def cmd_doctor(cfg: Config) -> int:
         for item in unconfirmed_values(cfg):
             print(f"        - {item}")
 
+    from anon.chartfeed import resolve_feed_path
+
+    feed_path = resolve_feed_path(ex.chart_feed)
+    if feed_path:
+        row(True, f"ส่งข้อมูลขึ้นกราฟ: {feed_path}")
+    else:
+        row(None, "ไม่ได้ส่งข้อมูลขึ้นกราฟ (chart_feed ปิด หรือไม่ใช่ Windows)")
+
     if cfg.omega.ai_enabled:
         try:
             import anthropic  # noqa: F401
@@ -293,13 +301,18 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
 
         ai = ClaudeReviewer(cfg.levels, cfg.omega)
 
+    from anon.chartfeed import ChartFeed, resolve_feed_path
+
     broker = MT5Broker(ex)
     broker.connect()
     engine = Engine(cfg, broker, approver, journal, ai)
     state_path = Path(ex.state_path)
     if state_path.exists():
         engine.load_state(json.loads(state_path.read_text(encoding="utf-8")))
+    feed_path = resolve_feed_path(ex.chart_feed)
+    feed = ChartFeed(feed_path) if feed_path else None
     print(f"ANON live on {ex.symbol} | dry_run={ex.dry_run} | approval={ex.approval} | AI={'on' if ai else 'off'}")
+    print(f"กราฟ: {feed_path if feed else 'ปิด (execution.chart_feed)'}")
     last_bar = None
     try:
         while True:
@@ -313,6 +326,10 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
                     log.exception("bar %s failed", last_bar)
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 state_path.write_text(json.dumps(engine.to_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+                if feed:
+                    feed.update(engine, ex.symbol, ex.dry_run, ai is not None)
+            if feed:
+                feed.write()  # heartbeat every poll so the chart can tell the engine is alive
             time.sleep(poll_s)
     except KeyboardInterrupt:
         print("stopped")

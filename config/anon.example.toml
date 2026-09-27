@@ -55,6 +55,7 @@ day_utc_offset_hours = 7.0     # ตัดวันตามเวลาไท�
 journal_path = "journal/anon_journal.jsonl"
 state_path = "state/anon_state.json"
 # usdthb = 33.42               # ใส่เมื่อต้องการแปลง P/L จริงเป็นบาทในบันทึก
+chart_feed = "auto"            # ส่งสถานะ engine ขึ้นกราฟ MT5 (ไฟล์ใน Common\Files) · "" = ปิด
 
 [auto]
 # ระดับอัตโนมัติ: วาดเส้นใหม่ทุกวันจากกรอบราคา lookback_bars แท่ง H1 ล่าสุด (ใช้แท่งที่ปิดแล้วเท่านั้น)
