@@ -134,8 +134,10 @@ def validate_idea(idea: Idea) -> None:
 
 
 def idea_hash(idea: Idea) -> str:
-    """Fingerprint of the idea's source: any edit after seeing results is a new attempt."""
-    source = inspect.getsource(type(idea))
+    """Fingerprint of the idea's whole module (helpers included): any edit after seeing results
+    is a new attempt."""
+    module = inspect.getmodule(type(idea))
+    source = inspect.getsource(module) if module is not None else inspect.getsource(type(idea))
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
 
 

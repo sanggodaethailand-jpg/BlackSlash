@@ -228,17 +228,48 @@ def registered_and_template():
     return [*load_ideas().values(), TEMPLATE]
 
 
+def market_like(n=16000, seed=4):
+    """Volatility regimes and occasional 4% jumps, so every kind of idea finds trades."""
+    rng = random.Random(seed)
+    out, price, vol = [], 20000.0, 0.004
+    t0 = datetime(2021, 1, 4, tzinfo=UTC)
+    for i in range(n):
+        if rng.random() < 0.01:
+            vol = rng.choice([0.0015, 0.003, 0.006, 0.012])
+        r = rng.gauss(0, vol) + (rng.choice([-1, 1]) * 0.04 if rng.random() < 0.002 else 0.0)
+        close = price * math.exp(r)
+        wick = abs(rng.gauss(0, vol)) * price
+        out.append(bars_from([(price, max(price, close) + wick, min(price, close) - wick * rng.random(), close)],
+                             t0 + (datetime(2021, 1, 4, 1, tzinfo=UTC) - t0) * i)[0])
+        price = close
+    return out
+
+
+def trending(n=16000):
+    rng = random.Random(11)
+    path = [20000.0]
+    for _ in range(n // 24 + 1):
+        path.append(path[-1] * (1 + rng.gauss(0, 0.03)))
+    return waypoint_bars(path, bars_per_leg=24, noise=150, seed=3)[:n]
+
+
+GUARD_DATA = {"market_like": market_like(), "trending": trending()}
+
+
 @pytest.mark.parametrize("idea", registered_and_template(), ids=lambda i: i.name)
 def test_every_idea_is_valid_and_never_looks_ahead(idea):
     validate_idea(idea)
-    rng = random.Random(11)
-    path = [20000.0]
-    for _ in range(700):
-        path.append(path[-1] * (1 + rng.gauss(0, 0.03)))
-    bars = waypoint_bars(path, bars_per_leg=24, noise=150, seed=3)[:16000]
     cells = grid_cells(idea)
-    for params in {str(c): c for c in (idea.primary, cells[0], cells[-1])}.values():  # the corners and the primary
-        assert lookahead_violations(idea, params, bars) == [], (idea.name, params)
+    for data_name, bars in GUARD_DATA.items():
+        for params in {str(c): c for c in (idea.primary, cells[-1])}.values():  # the primary and a far corner
+            costs = Costs(spread=10.0, swap_long=-8.0)
+            assert simulate(idea, params, bars, costs) is not None
+            assert lookahead_violations(idea, params, bars, costs, max_checks=60) == [], (idea.name, data_name, params)
+
+
+def test_the_guard_data_gives_every_idea_trades():
+    for idea in registered_and_template():
+        assert simulate(idea, idea.primary, GUARD_DATA["market_like"], Costs(spread=10.0)), idea.name
 
 
 def test_idea_rules_are_enforced():
