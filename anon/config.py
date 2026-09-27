@@ -74,6 +74,27 @@ class OmegaConfig:
 
 
 @dataclass(frozen=True)
+class AutoLevelsConfig:
+    """Levels redrawn once per local day from the prior ``lookback_bars`` closed H1 bars.
+
+    Each level is a fraction of that window's range (low → high). The defaults are the
+    handoff's own geometry: with low 83000 and high 87000 they give back exactly
+    A 83000–83500, B ref 84400, gray 84700 ± 150, TP1 85500, liq 87000,
+    stop buffer 50 and retest tolerance 100."""
+
+    enabled: bool = False
+    lookback_bars: int = 72
+    min_range_atr: float = 3.0  # skip the day when the range is under this many ATRs
+    a_top: float = 0.125
+    b_ref: float = 0.35
+    gray_center: float = 0.425
+    gray_half: float = 0.0375
+    tp1: float = 0.625
+    stop_buffer: float = 0.0125
+    retest_tolerance: float = 0.025
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     mode: Literal["backtest", "paper", "live"] = "backtest"
     symbol: str = "BTCUSD"
@@ -104,6 +125,7 @@ class Config:
     zen: ZenConfig = field(default_factory=ZenConfig)
     omega: OmegaConfig = field(default_factory=OmegaConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    auto: AutoLevelsConfig = field(default_factory=AutoLevelsConfig)
 
     def validate(self) -> None:
         lv, rk = self.levels, self.risk
@@ -117,6 +139,11 @@ class Config:
             raise ValueError("risk_per_trade_pct must be > 0 and <= daily_loss_pct")
         if self.ghost.min_rr <= 0:
             raise ValueError("min_rr must be > 0")
+        au = self.auto
+        if not 0 < au.a_top < au.gray_center - au.gray_half < au.gray_center + au.gray_half < au.tp1 < 1:
+            raise ValueError("auto fractions must satisfy 0 < a_top < gray band < tp1 < 1")
+        if au.lookback_bars < 2 or au.stop_buffer < 0 or au.retest_tolerance < 0:
+            raise ValueError("auto.lookback_bars >= 2 and non-negative buffers required")
         offset = self.execution.server_utc_offset_hours
         if isinstance(offset, str) and offset != "auto":
             raise ValueError('server_utc_offset_hours must be a number or "auto"')

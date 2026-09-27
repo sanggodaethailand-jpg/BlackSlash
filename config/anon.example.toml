@@ -55,3 +55,17 @@ day_utc_offset_hours = 7.0     # ตัดวันตามเวลาไท�
 journal_path = "journal/anon_journal.jsonl"
 state_path = "state/anon_state.json"
 # usdthb = 33.42               # ใส่เมื่อต้องการแปลง P/L จริงเป็นบาทในบันทึก
+
+[auto]
+# ระดับอัตโนมัติ: วาดเส้นใหม่ทุกวันจากกรอบราคา lookback_bars แท่ง H1 ล่าสุด (ใช้แท่งที่ปิดแล้วเท่านั้น)
+# ค่าเป็นสัดส่วนของกรอบ (ล่าง=0, บน=1) ตั้งไว้ตรงกับรูปทรงในใบส่งมอบ: กรอบ 83000–87000 → เส้นเดิมเป๊ะ
+enabled = false          # true = ใช้ระดับอัตโนมัติแทน [levels] (อินดิเคเตอร์ยังแสดง [levels] อยู่)
+lookback_bars = 72
+min_range_atr = 3.0      # กรอบแคบกว่านี้ × ATR = ไม่วาด ไม่เทรดวันนั้น
+a_top = 0.125
+b_ref = 0.35
+gray_center = 0.425
+gray_half = 0.0375
+tp1 = 0.625
+stop_buffer = 0.0125
+retest_tolerance = 0.025

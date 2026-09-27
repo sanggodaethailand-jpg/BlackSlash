@@ -4,11 +4,12 @@
 #   math     risk numbers from the real account
 #   backtest backtest on the last -Days of MT5 H1 history (journal\backtest.jsonl)
 #   report   Quant report of the live journal
+#   research auto-levels backtest on MT5 history (default 3 years), min RR 1.0 vs 1.5, summary only
 #   dryrun   live loop in dry-run: computes everything, sends nothing (Ctrl+C to stop)
 # This script never sends real orders. Real orders need: dry_run = false, confirmed_by set,
 # and a manual "anon live --confirm-live".
 param(
-    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun")]
+    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research")]
     [string]$Task = "all",
     [int]$Days = 365
 )
@@ -45,6 +46,13 @@ switch ($Task) {
     "backtest" { [void](Anon $BacktestArgs) }
     "report"   { [void](Anon @("report", "--journal", "journal/anon_journal.jsonl")) }
     "dryrun"   { [void](Anon @("live")) }
+    "research" {
+        $span = if ($PSBoundParameters.ContainsKey("Days")) { $Days } else { 1095 }
+        foreach ($rr in @("1.0", "1.5")) {
+            [void](Anon @("backtest", "--mt5", "--days", "$span", "--auto", "--min-rr", $rr, "--summary",
+                          "--journal", "journal/research_rr$rr.jsonl"))
+        }
+    }
     "all" {
         $code = Anon @("doctor") -AllowFail
         if ($code -ne 0) {
