@@ -119,6 +119,19 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class LabConfig:
+    """Costs and ledger for the Idea Lab (anon lab)."""
+
+    spread: float = 10.0  # price units; BTCUSDc on the owner's account shows 10.0
+    swap_mode: Literal["points", "percent"] = "points"  # as in MT5 Specification
+    swap_long: float = 0.0  # per night; negative = the position pays (0 = not entered yet)
+    swap_short: float = 0.0
+    point: float = 0.01  # one point in price units (BTCUSDc: 2 digits)
+    commission: float = 0.0  # price units per round turn
+    ledger: str = "research/ledger.jsonl"
+
+
+@dataclass(frozen=True)
 class Config:
     levels: LevelsConfig = field(default_factory=LevelsConfig)
     ghost: GhostConfig = field(default_factory=GhostConfig)
@@ -127,6 +140,7 @@ class Config:
     omega: OmegaConfig = field(default_factory=OmegaConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     auto: AutoLevelsConfig = field(default_factory=AutoLevelsConfig)
+    lab: LabConfig = field(default_factory=LabConfig)
 
     def validate(self) -> None:
         lv, rk = self.levels, self.risk
@@ -145,6 +159,8 @@ class Config:
             raise ValueError("auto fractions must satisfy 0 < a_top < gray band < tp1 < 1")
         if au.lookback_bars < 2 or au.stop_buffer < 0 or au.retest_tolerance < 0:
             raise ValueError("auto.lookback_bars >= 2 and non-negative buffers required")
+        if self.lab.swap_mode not in ("points", "percent") or self.lab.spread < 0 or self.lab.point <= 0:
+            raise ValueError('lab: swap_mode "points" or "percent", spread >= 0, point > 0')
         offset = self.execution.server_utc_offset_hours
         if isinstance(offset, str) and offset != "auto":
             raise ValueError('server_utc_offset_hours must be a number or "auto"')

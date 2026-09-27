@@ -70,3 +70,13 @@ gray_half = 0.0375
 tp1 = 0.625
 stop_buffer = 0.0125
 retest_tolerance = 0.025
+
+[lab]
+# Idea Lab (anon lab): ต้นทุนที่ใช้ทดสอบไอเดีย · ดูค่าจาก MT5: คลิกขวา BTCUSDc ใน Market Watch → Specification
+spread = 10.0            # หน่วยราคา (BTCUSDc บนบัญชีบอสขึ้น 10.0)
+swap_mode = "points"     # "points" หรือ "percent" (ต่อปี) ตามที่ Specification เขียน
+swap_long = 0.0          # ต่อคืน · ติดลบ = เราจ่าย · 0 = ยังไม่ได้ใส่ (ผลไม้ข้ามคืนจะดูดีเกินจริง)
+swap_short = 0.0
+point = 0.01             # 1 จุดเท่ากับกี่หน่วยราคา (BTCUSDc ทศนิยม 2 ตำแหน่ง)
+commission = 0.0         # หน่วยราคาต่อไม้ (เปิด+ปิด)
+ledger = "research/ledger.jsonl"   # สมุดทะเบียน: ทุกครั้งที่ลองถูกนับ ห้ามลบ ห้ามแก้
