@@ -68,18 +68,21 @@ input int    InpMarkerBars     = 500;       // ย้อนหลังกี่
 input bool   InpShowPanel      = true;
 input int    InpPanelX         = 10;
 input int    InpPanelY         = 25;
-input int    InpPanelWidth     = 470;
-input string InpFont           = "Tahoma";
+input int    InpPanelWidth     = 560;
+input string InpFont           = "Consolas";  // Cyberpunk: monospace
 input int    InpFontSize       = 9;
-input color  InpClrAZone       = C'46,110,70';
-input color  InpClrGray        = C'105,105,105';
-input color  InpClrPanel       = C'22,24,32';
-input color  InpClrPanelBorder = C'70,74,90';
-input color  InpClrText        = C'225,228,235';
-input color  InpClrMuted       = C'150,155,170';
-input color  InpClrGood        = clrLimeGreen;
-input color  InpClrBad         = clrTomato;
-input color  InpClrWarn        = clrGold;
+input color  InpClrAZone       = C'0,70,85';     // neon teal (dim)
+input color  InpClrGray        = C'75,20,95';    // violet haze
+input color  InpClrPanel       = C'8,4,20';      // near-black purple
+input color  InpClrPanelBorder = C'255,0,170';   // neon magenta
+input color  InpClrAccent      = C'255,0,170';   // section headers
+input color  InpClrText        = C'0,240,255';   // neon cyan
+input color  InpClrMuted       = C'150,120,210'; // lavender
+input color  InpClrGood        = C'57,255,20';   // acid green
+input color  InpClrBad         = C'255,40,110';  // hot pink
+input color  InpClrWarn        = C'255,230,0';   // neon yellow
+
+input bool   InpCyberChart     = true;      // ธีม Cyberpunk ทั้งกราฟ (คืนสีเดิมเมื่อถอดอินดิเคเตอร์)
 
 input group "Engine (Python) บนกราฟ"
 input bool   InpShowEngine     = true;              // แสดงสิ่งที่ engine ทำ (ไฟล์จาก run.bat)
@@ -135,7 +138,6 @@ int    IMax(const int a, const int b) { return a > b ? a : b; }
 int    IMin(const int a, const int b) { return a < b ? a : b; }
 double GrayLow()  { return InpGrayCenter - InpGrayHalf; }
 double GrayHigh() { return InpGrayCenter + InpGrayHalf; }
-int    LineHeight() { return InpFontSize * 2; }
 
 double RewardRisk(const double entry, const double stop, const double tp)
   {
@@ -456,12 +458,17 @@ void DrawLevels()
 //+------------------------------------------------------------------+
 //| panel                                                            |
 //+------------------------------------------------------------------+
+// Font size is in points and grows with Windows display scaling; pixel offsets do not, so scale them.
+double Dpi()        { int d = (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI); return d > 0 ? d / 96.0 : 1.0; }
+int    Px2(const int px) { return (int)MathRound(px * Dpi()); }
+int    LineHeight() { return Px2(InpFontSize * 2 + 2); }
+
 void Line(const string s, const color c)
   {
    ArrayResize(g_txt, g_lines + 1);
    ArrayResize(g_col, g_lines + 1);
    g_txt[g_lines] = s;
-   g_col[g_lines] = c;
+   g_col[g_lines] = StringFind(s, "──") == 0 ? InpClrAccent : c;
    g_lines++;
   }
 
@@ -478,8 +485,9 @@ void PanelBg(const int lines)
      }
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, InpPanelWidth);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, 12 + lines * LineHeight());
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, Px2(InpPanelWidth));
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, Px2(12) + lines * LineHeight());
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpClrPanel);
    ObjectSetInteger(0, name, OBJPROP_COLOR, InpClrPanelBorder);
   }
@@ -500,8 +508,8 @@ void RenderPanel()
         }
       ObjectSetString(0, name, OBJPROP_FONT, InpFont);
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + 8);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + 6 + i * LineHeight());
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + Px2(8));
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + Px2(6) + i * LineHeight());
       ObjectSetString(0, name, OBJPROP_TEXT, g_txt[i]);
       ObjectSetInteger(0, name, OBJPROP_COLOR, g_col[i]);
      }
@@ -762,7 +770,7 @@ void BuildPanel()
    long left = (long)(h1_open + 3600 - TimeTradeServer());
    if(left < 0)
       left = 0;
-   Line("ANON · " + _Symbol + " · H1 ถัดไปปิดใน " + StringFormat("%02d:%02d", (int)(left / 60), (int)(left % 60)),
+   Line("// ANON :: NEURAL LINK · " + _Symbol + " · H1 ถัดไปปิดใน " + StringFormat("%02d:%02d", (int)(left / 60), (int)(left % 60)),
         InpClrText);
    Line("bid " + Px(bid) + " / ask " + Px(ask) + " · spread " + Px(ask - bid), InpClrMuted);
    if(g_n < 2)
@@ -937,8 +945,28 @@ void BuildPanel()
 //+------------------------------------------------------------------+
 //| indicator events                                                 |
 //+------------------------------------------------------------------+
+ENUM_CHART_PROPERTY_INTEGER g_theme_props[] = {CHART_COLOR_BACKGROUND, CHART_COLOR_FOREGROUND, CHART_COLOR_GRID,
+   CHART_COLOR_CHART_UP, CHART_COLOR_CHART_DOWN, CHART_COLOR_CANDLE_BULL, CHART_COLOR_CANDLE_BEAR,
+   CHART_COLOR_CHART_LINE, CHART_COLOR_BID, CHART_COLOR_ASK};
+long g_theme_saved[10];
+bool g_theme_on = false;
+
+void CyberTheme()
+  {
+   color c[] = {C'5,2,15', C'150,120,210', C'30,10,50', C'0,240,255', C'255,0,170', C'0,240,255', C'255,0,170',
+                C'0,240,255', C'255,230,0', C'255,0,170'};
+   for(int i = 0; i < ArraySize(g_theme_props); i++)
+     {
+      g_theme_saved[i] = ChartGetInteger(0, g_theme_props[i]);
+      ChartSetInteger(0, g_theme_props[i], c[i]);
+     }
+   g_theme_on = true;
+  }
+
 int OnInit()
   {
+   if(InpCyberChart)
+      CyberTheme();
    if(InpGrayHalf <= 0.0 || !(InpAZoneBot < InpAZoneTop && InpAZoneTop < GrayLow() && GrayHigh() < InpTP1))
      {
       Print("ANON: ระดับราคาต้องเรียง A bot < A top < เทา < TP1 และความกว้างเทา > 0");
@@ -980,6 +1008,9 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   if(g_theme_on && reason != REASON_CHARTCHANGE)
+      for(int i = 0; i < ArraySize(g_theme_props); i++)
+         ChartSetInteger(0, g_theme_props[i], g_theme_saved[i]);
    ObjectsDeleteAll(0, PFX);
    ChartRedraw();
   }
