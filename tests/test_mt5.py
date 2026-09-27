@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from anon.broker.mt5 import MT5Broker
+from anon.broker.mt5 import MT5Broker, suffixed_name
 from anon.config import ExecutionConfig
 
 EPOCH = int(datetime(2026, 9, 27, 12, tzinfo=UTC).timestamp())
@@ -124,3 +124,35 @@ def test_unknown_symbol_lists_what_the_broker_has():
     b.mt5.symbols_get = lambda group: (SimpleNamespace(name="BTCUSDc"), SimpleNamespace(name="BTCJPYc"))
     with pytest.raises(RuntimeError, match="BTCUSDc, BTCJPYc"):
         b.connect()
+
+
+EXNESS_CENT = ["BTCUSDc", "BTCUSDTc", "ETHBTCc"]
+
+
+def test_suffixed_name_finds_the_account_suffix_only():
+    assert suffixed_name("BTCUSD", EXNESS_CENT) == "BTCUSDc"
+    assert suffixed_name("BTCUSD", ["BTCUSD.a", "BTCUSDT"]) == "BTCUSD.a"
+    assert suffixed_name("BTCUSD", ["BTCUSDT", "BTCUSD2"]) is None  # other markets, not suffixes
+    assert suffixed_name("BTCUSD", ["BTCUSDc", "BTCUSDm"]) is None  # ambiguous: ask the owner
+    assert suffixed_name("BTCUSD", ["BTCUSD.longname"]) is None
+
+
+def exness_cent(dry_run):
+    b = broker(dry_run=dry_run)
+    b.mt5.initialize = lambda *a, **k: True
+    b.mt5.symbol_select = lambda s, e: s in EXNESS_CENT
+    b.mt5.symbols_get = lambda group: tuple(SimpleNamespace(name=n) for n in EXNESS_CENT)
+    return b
+
+
+def test_dry_run_uses_the_suffixed_symbol():
+    b = exness_cent(dry_run=True)
+    b.connect()
+    assert b.symbol == "BTCUSDc"
+    b.closed_bars(3)
+    assert b.mt5.rates_args[0] == "BTCUSDc"
+
+
+def test_real_orders_need_the_exact_symbol():
+    with pytest.raises(RuntimeError, match="cannot select BTCUSD: .*BTCUSDc, BTCUSDTc"):
+        exness_cent(dry_run=False).connect()

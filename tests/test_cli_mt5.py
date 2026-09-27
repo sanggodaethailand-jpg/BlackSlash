@@ -187,3 +187,20 @@ def test_sweep_from_mt5_prints_the_grid(fake, capsys):
     out = capsys.readouterr().out
     assert "ลอง 2 แบบ" in out and "ช่อง" in out and "เทียบกับความบังเอิญ" in out
     assert out.count("|") > 6
+
+
+class SuffixFakeMT5(CentFakeMT5):
+    def symbol_select(self, symbol, enable):
+        return symbol == "BTCUSDc"
+
+    def symbols_get(self, group):
+        return tuple(SimpleNamespace(name=n) for n in ("BTCUSDc", "BTCUSDTc", "ETHBTCc"))
+
+
+def test_default_config_on_a_suffixed_broker_still_runs(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "MetaTrader5", SuffixFakeMT5())
+    assert cli.cmd_doctor(Config()) == 0
+    out = capsys.readouterr().out
+    assert "โบรกเกอร์นี้ไม่มี BTCUSD → dry-run ใช้ BTCUSDc แทน" in out and "BTCUSDc: contract size" in out
+    cli.cmd_sweep(Config(), None, 30, rrs=[1.5], lookbacks=[72], null_trials=0)
+    assert "MT5 BTCUSDc H1 30 วัน" in capsys.readouterr().out

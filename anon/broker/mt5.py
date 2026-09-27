@@ -21,6 +21,18 @@ _REASONS = {0: "manual", 1: "manual", 2: "manual", 3: "expert", 4: "sl", 5: "tp"
 _ENTRY_IN, _ENTRY_OUT, _ENTRY_OUT_BY = 0, 1, 3
 
 
+def suffixed_name(symbol: str, names: list[str]) -> str | None:
+    """The broker's name for ``symbol`` when it only adds an account-type suffix
+    (BTCUSD -> BTCUSDc, BTCUSDm, BTCUSD.a). BTCUSDT is a different market, so a
+    suffix may not start with a capital letter or digit; more than one match is ambiguous."""
+    found = []
+    for name in names:
+        suffix = name[len(symbol):] if name.startswith(symbol) else ""
+        if 0 < len(suffix) <= 4 and not suffix[0].isupper() and not suffix[0].isdigit():
+            found.append(name)
+    return found[0] if len(found) == 1 else None
+
+
 class MT5Broker:
     def __init__(self, cfg: ExecutionConfig, mt5_module=None) -> None:
         if mt5_module is None:
@@ -49,9 +61,14 @@ class MT5Broker:
         if not mt5.symbol_select(self.symbol, True):
             error = mt5.last_error()
             listing = getattr(mt5, "symbols_get", None)
-            names = [s.name for s in (listing(group="*BTC*") or ())] if listing else []
-            hint = f" — ชื่อ BTC ที่โบรกเกอร์นี้มี: {', '.join(names)} (ใส่ใน execution.symbol)" if names else ""
-            raise RuntimeError(f"cannot select {self.symbol}: {error}{hint}")
+            names = [s.name for s in (listing(group=f"*{self.symbol[:3]}*") or ())] if listing else []
+            alias = suffixed_name(self.symbol, names)
+            if alias and self.cfg.dry_run and mt5.symbol_select(alias, True):
+                log.warning("%s is not offered here: using %s (same name + account suffix)", self.symbol, alias)
+                self.symbol = alias
+            else:
+                hint = f" — ชื่อที่โบรกเกอร์นี้มี: {', '.join(names)} (ใส่ใน execution.symbol)" if names else ""
+                raise RuntimeError(f"cannot select {self.symbol}: {error}{hint}")
         if self.offset is None:
             self.offset = self.detect_offset()
             log.info("server clock = UTC%+.1fh (auto)", self.offset.total_seconds() / 3600)

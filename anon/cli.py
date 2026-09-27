@@ -99,7 +99,7 @@ def _history(cfg: Config, csv_path: str | None, days: int | None) -> tuple[list,
             "starting_balance": account.equity,
             "currency": account.currency,
         }
-        source = (f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {ask - bid:.1f}, "
+        source = (f"MT5 {broker.symbol} H1 {days} วัน (spread ตอนนี้ {ask - bid:.1f}, "
                   f"เริ่มที่ equity จริง {account.equity:,.2f} {account.currency}{_cent_note(account.currency)})")
     if not bars:
         sys.exit("ไม่มีแท่งให้ backtest")
@@ -232,8 +232,11 @@ def cmd_doctor(cfg: Config) -> int:
             row(None, "บัญชีจริง + dry_run=false → ทุกไม้จะใช้เงินจริง")
         elif mode == "REAL":
             row(None, "บัญชี REAL: dry-run ไม่ส่งออเดอร์ แต่ก่อนส่งจริงให้ทดสอบบนบัญชี DEMO ก่อน")
+        if broker.symbol != ex.symbol:
+            row(None, f"โบรกเกอร์นี้ไม่มี {ex.symbol} → dry-run ใช้ {broker.symbol} แทน "
+                      f"(ส่งออเดอร์จริงต้องใส่ symbol = \"{broker.symbol}\" ใน config เอง)")
         spec = broker.spec()
-        row(True, f"{ex.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step} · "
+        row(True, f"{broker.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step} · "
                   f"lot {cfg.risk.lot} = {cfg.risk.lot * spec.money_per_point:,.4g} {info.currency} ต่อ 1 จุด")
         if info.currency == "USC":
             row(None, "บัญชีเซ็นต์ (USC): ตัวเลขเงินทั้งหมดเป็นเซ็นต์ 100 USC = 1 USD — Risk คิดเป็น USC ให้แล้ว")
@@ -332,7 +335,7 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
         engine.load_state(json.loads(state_path.read_text(encoding="utf-8")))
     feed_path = resolve_feed_path(ex.chart_feed)
     feed = ChartFeed(feed_path) if feed_path else None
-    print(f"ANON live on {ex.symbol} | dry_run={ex.dry_run} | approval={ex.approval} | AI={'on' if ai else 'off'}")
+    print(f"ANON live on {broker.symbol} | dry_run={ex.dry_run} | approval={ex.approval} | AI={'on' if ai else 'off'}")
     print(f"กราฟ: {feed_path if feed else 'ปิด (execution.chart_feed)'}")
     last_bar = None
     try:
@@ -348,7 +351,7 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 state_path.write_text(json.dumps(engine.to_state(), ensure_ascii=False, indent=2), encoding="utf-8")
                 if feed:
-                    feed.update(engine, ex.symbol, ex.dry_run, ai is not None)
+                    feed.update(engine, broker.symbol, ex.dry_run, ai is not None)
             if feed:
                 feed.write()  # heartbeat every poll so the chart can tell the engine is alive
             time.sleep(poll_s)
