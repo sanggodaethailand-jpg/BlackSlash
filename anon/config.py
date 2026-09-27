@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,6 +21,7 @@ class LevelsConfig:
     gray_half_width: float = 150.0  # ต้องยืนยัน: ใบส่งมอบให้เทาเป็นเส้นเดียว ไม่มีความกว้าง
     tp1: float = 85500.0
     liq_top: float = 87000.0
+    valid_until: str = ""  # last local (Thai) day these weekly levels may open trades, YYYY-MM-DD; "" = no expiry
 
     @property
     def gray_low(self) -> float:
@@ -154,6 +156,11 @@ class Config:
             raise ValueError("levels must satisfy a_zone_bot < a_zone_top < gray < tp1")
         if lv.gray_half_width <= 0:
             raise ValueError("gray_half_width must be > 0")
+        if lv.valid_until:
+            try:
+                date.fromisoformat(lv.valid_until)
+            except ValueError as exc:
+                raise ValueError("levels.valid_until must be YYYY-MM-DD") from exc
         if rk.lot > rk.max_lot:
             raise ValueError(f"lot {rk.lot} exceeds max_lot {rk.max_lot}")
         if not 0 < rk.risk_per_trade_pct <= rk.daily_loss_pct:

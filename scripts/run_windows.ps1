@@ -8,9 +8,11 @@
 #   dryrun   live loop in dry-run: computes everything, sends nothing (Ctrl+C to stop)
 #   golive   REAL MONEY (live.bat): asks the owner to confirm, writes config\anon.live.toml,
 #            runs doctor on it, then the live loop; every trade still needs the typed approval
+#   levels   set this week's levels and their last day in config\anon.toml (levels.bat)
+#   forward  export the newest H1 bars, then the forward watch report (forward.bat)
 # Only the golive task can send real orders, and only after the owner types the confirmation.
 param(
-    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research", "golive")]
+    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research", "golive", "levels", "forward")]
     [string]$Task = "all",
     [int]$Days = 365
 )
@@ -48,6 +50,11 @@ switch ($Task) {
     "report"   { [void](Anon @("report", "--journal", "journal/anon_journal.jsonl")) }
     "dryrun"   { [void](Anon @("live")) }
     "golive"   { [void](Anon @("golive") -AllowFail) }
+    "levels"   { [void](Anon @("levels") -AllowFail) }
+    "forward"  {
+        [void](Anon @("export", "--days", "3650", "--out", "data/BTCUSDc_H1.csv"))
+        [void](Anon @("lab", "--forward", "--csv", "data/BTCUSDc_H1.csv"))
+    }
     "research" {
         $span = if ($PSBoundParameters.ContainsKey("Days")) { $Days } else { 1825 }
         [void](Anon @("sweep", "--mt5", "--days", "$span"))

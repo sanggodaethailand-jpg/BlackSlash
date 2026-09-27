@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from anon.quant import compute_stats
@@ -61,6 +62,8 @@ def render(engine, symbol: str, dry_run: bool, ai_on: bool) -> list[str]:
         f"gray_high={lv.gray_high:.2f}",
         f"tp1={lv.tp1:.2f}",
         f"liq={lv.liq_top:.2f}",
+        f"levels_until={'' if cfg.auto.enabled else cfg.levels.valid_until}",
+        f"levels_expired={int(engine.levels_expired(datetime.now(UTC)))}",
         f"zen_off_plan={zen.consecutive_off_plan}",
         f"zen_max={cfg.zen.max_consecutive_off_plan}",
         f"zen_locked={int(zen.locked)}",

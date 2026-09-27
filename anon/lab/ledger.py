@@ -39,8 +39,10 @@ class Ledger:
     def attempts(self) -> list[tuple[str, str]]:
         seen: list[tuple[str, str]] = []
         for row in self.rows:
+            if row["type"] != "attempt":
+                continue
             key = (row["idea"], row["hash"])
-            if row["type"] == "attempt" and key not in seen:
+            if key not in seen:
                 seen.append(key)
         return seen
 

@@ -1,4 +1,4 @@
-"""Command line: doctor | math | export | backtest | sweep | lab | demo | report | live | golive"""
+"""Command line: doctor | math | export | backtest | sweep | lab | demo | report | live | golive | levels"""
 
 from __future__ import annotations
 
@@ -128,7 +128,8 @@ def cmd_sweep(
 
 
 def cmd_lab(
-    cfg: Config, csv_path: str | None, names: list[str], trials: int | None, list_only: bool, smoke: bool, workers: int = 1
+    cfg: Config, csv_path: str | None, names: list[str], trials: int | None, list_only: bool, smoke: bool, workers: int = 1,
+    forward: bool = False,
 ) -> None:
     from anon.data import load_bars
     from anon.lab.core import Costs, idea_hash
@@ -145,6 +146,19 @@ def cmd_lab(
             res = results.get(key)
             verdict = "ยังไม่มีผล" if res is None else "✅ ผ่าน" if res["passed"] else f"❌ ตกด่าน {res['failed_gate']}"
             print(f"  {key[0]} ({key[1]}): {verdict}")
+        return
+    if forward:
+        from anon.lab.forward import format_forward, run_forward, watches
+
+        if not watches(ledger):
+            sys.exit("ยังไม่มีไอเดียที่ลงทะเบียนเฝ้าดูในสมุด")
+        if not csv_path:
+            sys.exit("ต้องใส่ --csv ไฟล์แท่ง H1 (anon export)")
+        bars = load_bars(csv_path, static_offset_hours(cfg))
+        costs = Costs(lab.spread, lab.slippage, lab.swap_mode, lab.swap_long, lab.swap_short, lab.point,
+                      tuple(lab.swap_days), lab.rollover, lab.commission)
+        for report in run_forward(ledger, load_ideas(), bars, costs):
+            print(format_forward(report))
         return
     if smoke:
         from anon.lab.ideas._template import IDEA
@@ -245,6 +259,21 @@ def cmd_doctor(cfg: Config) -> int:
         row(None, "ยังไม่มีคนเคาะค่าที่ต้องยืนยัน (execution.confirmed_by ว่าง) → ส่งออเดอร์จริงไม่ได้")
         for item in unconfirmed_values(cfg):
             print(f"        - {item}")
+
+    lv = cfg.levels
+    if cfg.auto.enabled:
+        row(True, "เส้นราคา: อัตโนมัติ (วาดใหม่ทุกวันจากกรอบราคาล่าสุด)")
+    else:
+        from anon.levelset import local_today
+
+        lines = (f"เส้นราคา: A {lv.a_zone_bot:,.0f}–{lv.a_zone_top:,.0f} · เทา {lv.gray_low:,.0f}–{lv.gray_high:,.0f} · "
+                 f"TP1 {lv.tp1:,.0f}")
+        if not lv.valid_until:
+            row(None, lines + " · ไม่มีวันหมดอายุ (ตั้งเส้นประจำสัปดาห์ด้วย levels.bat)")
+        elif local_today(cfg).isoformat() > lv.valid_until:
+            row(None if ex.dry_run else False, lines + f" · หมดอายุแล้ว ({lv.valid_until}) → ไม่เปิดไม้ใหม่ ตั้งเส้นใหม่ด้วย levels.bat")
+        else:
+            row(True, lines + f" · ใช้ได้ถึง {lv.valid_until}")
 
     from anon.chartfeed import resolve_feed_path
 
@@ -470,6 +499,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--list", action="store_true", help="show the ledger: attempts so far and verdicts")
     p.add_argument("--smoke", action="store_true", help="machine check on the template idea; nothing is recorded")
     p.add_argument("--workers", type=int, default=1, help="processes for the null test (results do not depend on it)")
+    p.add_argument("--forward", action="store_true", help="forward watch: judge watched ideas on bars after their date")
 
     p = sub.add_parser("export", help="save closed H1 bars from MT5 to CSV (UTC)")
     p.add_argument("--days", type=int, default=365)
@@ -498,6 +528,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("golive", help="owner only: confirm, write config/anon.live.toml, doctor, then trade for real")
     p.add_argument("--poll", type=float, default=15.0)
 
+    sub.add_parser("levels", help="set this week's levels (and their last day) in the config, with checks")
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
@@ -512,7 +544,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_sweep(cfg, args.csv, args.days if args.mt5 else None, rrs, lookbacks, args.null, (int(lookback), float(rr)))
     elif args.cmd == "lab":
         names = [x.strip() for x in args.ideas.split(",") if x.strip()]
-        cmd_lab(cfg, args.csv, names, args.trials, args.list, args.smoke, args.workers)
+        cmd_lab(cfg, args.csv, names, args.trials, args.list, args.smoke, args.workers, args.forward)
     elif args.cmd == "export":
         cmd_export(cfg, args.days, args.out)
     elif args.cmd == "backtest":
@@ -527,3 +559,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_live(cfg, args.confirm_live, args.poll)
     elif args.cmd == "golive":
         cmd_golive(cfg, args.config, args.poll)
+    elif args.cmd == "levels":
+        from anon.levelset import cmd_levels
+
+        sys.exit(0 if cmd_levels(cfg, args.config) else 1)
