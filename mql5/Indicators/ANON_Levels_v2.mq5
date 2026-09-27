@@ -488,7 +488,6 @@ void PanelBg(const int lines)
       ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-     }
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY);
       ObjectSetInteger(0, name, OBJPROP_XSIZE, Px2(InpPanelWidth));
