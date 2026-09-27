@@ -70,3 +70,18 @@ gray_half = 0.0375
 tp1 = 0.625
 stop_buffer = 0.0125
 retest_tolerance = 0.025
+
+[lab]
+# Idea Lab (anon lab): ต้นทุนที่ใช้ทดสอบไอเดีย · ดูค่าจาก MT5: คลิกขวา BTCUSDc ใน Market Watch → Specification
+spread = 10.0            # หน่วยราคา (BTCUSDc บนบัญชีบอสขึ้น 10.0)
+slippage = 0.0           # หน่วยราคาที่เสียเพิ่มทุกครั้งที่เข้า/ออก (ด่าน 3 ทดสอบที่ 5 อยู่แล้ว)
+# Specification 27 ก.ย. 2026: swap long -1855.5 points = -18.56 USD/BTC/วัน ที่ราคา 84,551 ≈ -8.0% ต่อปี · short 0
+# เก็บเป็น % ต่อปี ให้ย้อนอดีตได้ตามราคาในแต่ละช่วง (ไม่รู้อัตราในอดีต ด่าน 3 จึงทดสอบ swap ×2 ด้วย)
+swap_mode = "percent"    # "percent" (% ต่อปีของราคา) หรือ "points" (ตามหน้า Specification)
+swap_long = -8.0         # ติดลบ = เราจ่าย
+swap_short = 0.0
+point = 0.01             # 1 จุดเท่ากับกี่หน่วยราคา (BTCUSDc ทศนิยม 2 ตำแหน่ง)
+swap_days = [1, 1, 1, 1, 3, 0, 0]   # จันทร์..อาทิตย์ ตาม "Swap rates" (ศุกร์ ×3 เสาร์-อาทิตย์ 0)
+rollover = "new_york"    # คิด swap ตอน 17:00 นิวยอร์ก (21:00/22:00 UTC) · "utc_midnight" = 00:00 UTC
+commission = 0.0         # หน่วยราคาต่อไม้ (เปิด+ปิด)
+ledger = "research/ledger.jsonl"   # สมุดทะเบียน: ทุกครั้งที่ลองถูกนับ ห้ามลบ ห้ามแก้

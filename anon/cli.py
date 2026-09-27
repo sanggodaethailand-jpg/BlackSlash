@@ -1,4 +1,4 @@
-"""Command line: doctor | math | export | backtest | sweep | demo | report | live"""
+"""Command line: doctor | math | export | backtest | sweep | lab | demo | report | live"""
 
 from __future__ import annotations
 
@@ -125,6 +125,61 @@ def cmd_sweep(
     if null_trials > 0:
         print()
         print(format_null(run_null_test(cfg, bars, target[0], target[1], null_trials, **market)))
+
+
+def cmd_lab(
+    cfg: Config, csv_path: str | None, names: list[str], trials: int | None, list_only: bool, smoke: bool, workers: int = 1
+) -> None:
+    from anon.data import load_bars
+    from anon.lab.core import Costs, idea_hash
+    from anon.lab.gauntlet import HOLDOUT_FRACTION, format_report, run_gauntlet
+    from anon.lab.ideas import load_ideas
+    from anon.lab.ledger import Ledger, threshold
+
+    lab = cfg.lab
+    ledger = Ledger.open(None if smoke else lab.ledger)
+    if list_only:
+        attempts, results = ledger.attempts(), ledger.results()
+        print(f"สมุดทะเบียน {lab.ledger}: ลองแล้ว k={len(attempts)} → ไอเดียถัดไปต้องได้ p ≤ {threshold(len(attempts) + 1):.4f}")
+        for key in attempts:
+            res = results.get(key)
+            verdict = "ยังไม่มีผล" if res is None else "✅ ผ่าน" if res["passed"] else f"❌ ตกด่าน {res['failed_gate']}"
+            print(f"  {key[0]} ({key[1]}): {verdict}")
+        return
+    if smoke:
+        from anon.lab.ideas._template import IDEA
+
+        ideas = {IDEA.name: IDEA}
+        trials = trials or 20
+    else:
+        ideas = load_ideas()
+        if names:
+            missing = [n for n in names if n not in ideas]
+            if missing:
+                sys.exit(f"ไม่มีไอเดียชื่อ {', '.join(missing)} (มี: {', '.join(ideas) or '-'})")
+            ideas = {n: ideas[n] for n in names}
+    if not ideas:
+        sys.exit("ยังไม่มีไอเดียลงทะเบียนใน anon/lab/ideas/ (ดู AGENTS.md และ _template.py)")
+    if not csv_path:
+        sys.exit("ต้องใส่ --csv ไฟล์แท่ง H1 (anon export)")
+    bars = load_bars(csv_path, static_offset_hours(cfg))
+    costs = Costs(lab.spread, lab.slippage, lab.swap_mode, lab.swap_long, lab.swap_short, lab.point,
+                  tuple(lab.swap_days), lab.rollover, lab.commission)
+    if smoke:
+        print("ทดลองเครื่อง: รันแม่แบบ ไม่บันทึกลงสมุด ผลนี้ไม่ใช่หลักฐานอะไร\n")
+    cut = int(len(bars) * (1 - HOLDOUT_FRACTION))
+    data = {"bars": len(bars), "first": bars[0].time.isoformat(), "last": bars[-1].time.isoformat(),
+            "locked_from": bars[cut].time.isoformat()}
+    for idea in ideas.values():  # the whole round is on record before the first result
+        ledger.register(idea.name, idea_hash(idea), idea.primary, idea.grid, data)
+    k = len(ledger.attempts())
+    print(f"ลงทะเบียน {len(ideas)} ไอเดีย · ลองแล้วทั้งหมด k={k} → ทุกตัวต้องได้ p ≤ {threshold(k):.5f}\n", flush=True)
+    for idea in ideas.values():
+        print(f"กำลังทดสอบ {idea.name} ...", flush=True)
+        report = run_gauntlet(idea, bars, costs, ledger, trials=trials, workers=workers,
+                              progress=lambda msg: print(msg, flush=True))
+        print(format_report(report), flush=True)
+        print()
 
 
 def cmd_backtest(
@@ -383,6 +438,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--null", type=int, default=30, help="shuffled-history trials for the target setting (0 = skip)")
     p.add_argument("--target", default="72,1.5", help="lookback,min_rr to test against shuffled history")
 
+    p = sub.add_parser("lab", help="Idea Lab: run registered ideas through the five gates (see AGENTS.md)")
+    p.add_argument("--csv", help="H1 bars from anon export")
+    p.add_argument("--ideas", default="", help="comma-separated idea names (default: all registered)")
+    p.add_argument("--trials", type=int, default=None, help="shuffled-history trials (default: enough for p <= 0.05/k)")
+    p.add_argument("--list", action="store_true", help="show the ledger: attempts so far and verdicts")
+    p.add_argument("--smoke", action="store_true", help="machine check on the template idea; nothing is recorded")
+    p.add_argument("--workers", type=int, default=1, help="processes for the null test (results do not depend on it)")
+
     p = sub.add_parser("export", help="save closed H1 bars from MT5 to CSV (UTC)")
     p.add_argument("--days", type=int, default=365)
     p.add_argument("--out", default="data/BTCUSD_H1.csv")
@@ -419,6 +482,9 @@ def main(argv: list[str] | None = None) -> None:
         lookbacks = [int(x) for x in args.lookback.split(",") if x.strip()]
         lookback, rr = args.target.split(",")
         cmd_sweep(cfg, args.csv, args.days if args.mt5 else None, rrs, lookbacks, args.null, (int(lookback), float(rr)))
+    elif args.cmd == "lab":
+        names = [x.strip() for x in args.ideas.split(",") if x.strip()]
+        cmd_lab(cfg, args.csv, names, args.trials, args.list, args.smoke, args.workers)
     elif args.cmd == "export":
         cmd_export(cfg, args.days, args.out)
     elif args.cmd == "backtest":

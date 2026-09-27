@@ -119,6 +119,25 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class LabConfig:
+    """Costs and ledger for the Idea Lab (anon lab)."""
+
+    spread: float = 10.0  # price units; BTCUSDc on the owner's account shows 10.0
+    slippage: float = 0.0  # price units against every fill and exit
+    # MT5 Specification (2026-09-27): swap long -1855.5 points = -18.56 USD per BTC per day at
+    # BTC 84,551 = about -8.0% a year; short 0; Friday x3, weekend 0. Kept as a yearly rate so it
+    # scales with price back through the years (past rates are unknown; gate 3 also runs swap x2).
+    swap_mode: Literal["points", "percent"] = "percent"
+    swap_long: float = -8.0
+    swap_short: float = 0.0
+    point: float = 0.01  # one point in price units (BTCUSDc: 2 digits)
+    swap_days: tuple[float, ...] = (1, 1, 1, 1, 3, 0, 0)  # Monday..Sunday
+    rollover: Literal["new_york", "utc_midnight"] = "new_york"  # 17:00 New York = 21:00/22:00 UTC
+    commission: float = 0.0  # price units per round turn
+    ledger: str = "research/ledger.jsonl"
+
+
+@dataclass(frozen=True)
 class Config:
     levels: LevelsConfig = field(default_factory=LevelsConfig)
     ghost: GhostConfig = field(default_factory=GhostConfig)
@@ -127,6 +146,7 @@ class Config:
     omega: OmegaConfig = field(default_factory=OmegaConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     auto: AutoLevelsConfig = field(default_factory=AutoLevelsConfig)
+    lab: LabConfig = field(default_factory=LabConfig)
 
     def validate(self) -> None:
         lv, rk = self.levels, self.risk
@@ -145,6 +165,11 @@ class Config:
             raise ValueError("auto fractions must satisfy 0 < a_top < gray band < tp1 < 1")
         if au.lookback_bars < 2 or au.stop_buffer < 0 or au.retest_tolerance < 0:
             raise ValueError("auto.lookback_bars >= 2 and non-negative buffers required")
+        lab = self.lab
+        if lab.swap_mode not in ("points", "percent") or lab.rollover not in ("new_york", "utc_midnight"):
+            raise ValueError('lab: swap_mode "points"/"percent", rollover "new_york"/"utc_midnight"')
+        if lab.spread < 0 or lab.slippage < 0 or lab.point <= 0 or len(lab.swap_days) != 7:
+            raise ValueError("lab: spread/slippage >= 0, point > 0, swap_days has 7 values (Monday..Sunday)")
         offset = self.execution.server_utc_offset_hours
         if isinstance(offset, str) and offset != "auto":
             raise ValueError('server_utc_offset_hours must be a number or "auto"')
