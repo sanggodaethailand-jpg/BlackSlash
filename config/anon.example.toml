@@ -47,9 +47,10 @@ mode = "live"
 symbol = "BTCUSD"
 magic = 7700700
 approval = "manual"            # "auto" ใช้ได้เมื่อ Quant ผ่านเกณฑ์ n>=30, E[R]>0, P(edge>0)>=0.9
-dry_run = true                 # false + --confirm-live เท่านั้นถึงส่งออเดอร์จริง
+dry_run = true                 # false + --confirm-live + confirmed_by เท่านั้นถึงส่งออเดอร์จริง
+confirmed_by = ""              # ชื่อเจ้าของ/หัวหน้าที่เคาะค่า "ต้องยืนยัน" ทั้งหมดแล้ว
 deviation = 50
-server_utc_offset_hours = 3.0  # ต้องยืนยัน: เวลาเซิร์ฟเวอร์โบรกเกอร์ลบ UTC
+server_utc_offset_hours = "auto"  # อ่านจากราคาล่าสุดของโบรกเกอร์เอง (ใส่ตัวเลขได้ถ้าต้องการล็อก)
 day_utc_offset_hours = 7.0     # ตัดวันตามเวลาไทย
 journal_path = "journal/anon_journal.jsonl"
 state_path = "state/anon_state.json"

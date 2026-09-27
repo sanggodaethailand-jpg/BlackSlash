@@ -31,28 +31,48 @@
 3. **#208190412 "ห้ามนับ"** → Quant ไม่นับไม้นี้ แต่ Risk ยังนับเข้าเพดานรายวัน และห้ามเปิดไม้ใหม่ระหว่างที่ไม้นี้ยังเปิดอยู่
 4. **Ω "ไม่เอื้อ" = veto หรือแค่แท็ก** → ตั้งได้ใน `omega.unfavorable_action` (ค่าเริ่มต้น `veto`)
 
-## ติดตั้ง (Windows + MT5)
+## ทำทั้งหมดในคลิกเดียว (Windows)
 
-```powershell
-py -3.11 -m venv .venv; .venv\Scripts\activate
-pip install -e ".[mt5,ai,dev]"
-copy config\anon.example.toml config\anon.toml   # แล้วแก้ค่าที่เขียนว่า "ต้องยืนยัน"
-$env:MT5_LOGIN="..."; $env:MT5_PASSWORD="..."; $env:MT5_SERVER="..."   # ห้ามใส่รหัสผ่านใน config
-$env:ANTHROPIC_API_KEY="..."   # เฉพาะเมื่อ omega.ai_enabled = true
-```
+ต้องมีก่อน: [Python 3.11+](https://www.python.org/downloads/) (ติ๊ก *Add python.exe to PATH*) และ MT5 ที่เปิดล็อกอินค้างไว้
+
+1. ดาวน์โหลด repo นี้ (git clone หรือ Download ZIP แล้วแตกไฟล์)
+2. ดับเบิลคลิก **`setup.bat`** ระบบจะทำให้ครบ:
+   - สร้าง `.venv` แล้วติดตั้งแพ็กเกจ
+   - สร้าง `config\anon.toml` (ค่าเริ่มต้นเป็น dry-run)
+   - ติดตั้งและ**คอมไพล์** `ANON_Levels_v2` ให้ MT5 ทุกตัวในเครื่อง
+   - รันเทสต์ แล้วรัน `anon doctor`
+3. ดับเบิลคลิก **`run.bat`** ระบบจะรันต่อกันดังนี้:
+   - `doctor` → `math` จากบัญชีจริง
+   - backtest ด้วยประวัติ H1 ย้อนหลัง 1 ปีจาก MT5 ของบอสเอง
+   - เข้าลูป **dry-run**: คำนวณทุกแท่ง H1 แต่ไม่ส่งออเดอร์ (Ctrl+C เพื่อหยุด)
+   - ถ้าจะรันทีละงาน: `run.bat -Task doctor|math|backtest|report|dryrun`
+
+สคริปต์เหล่านี้**ไม่ส่งออเดอร์จริงเด็ดขาด** การส่งจริงต้องทำครบ 3 อย่างด้วยมือ:
+1. เคาะค่าที่ "ต้องยืนยัน" แล้วใส่ชื่อคนเคาะใน `execution.confirmed_by`
+2. ตั้ง `dry_run = false`
+3. รัน `anon --config config\anon.toml live --confirm-live`
+
+ถ้าไม่ได้ล็อกอิน MT5 ค้างไว้ ใส่ credential ใน environment ได้ ห้ามใส่ใน config:
+`$env:MT5_LOGIN`, `$env:MT5_PASSWORD`, `$env:MT5_SERVER`
+ถ้าเปิด Ω AI ต้องมี `$env:ANTHROPIC_API_KEY` ด้วย
 
 ## คำสั่ง
 
 ```bash
-anon math --equity 1000 --usdthb 33.42          # พิสูจน์ตัวเลข Risk จาก config
+anon doctor                                      # ตรวจ Python, config, MT5, บัญชี, สัญลักษณ์, เวลาเซิร์ฟเวอร์, ไม้ที่เปิด
+anon math --mt5 --usdthb 33.42                   # ตัวเลข Risk จาก equity/contract size/spread จริง
 anon demo                                        # ดูทุกด่านทำงานบนข้อมูลสังเคราะห์
-anon --config config/anon.toml backtest --csv data/BTCUSD_H1.csv --events
+anon backtest --mt5 --days 365 --journal journal/backtest.jsonl   # ดึงประวัติจาก MT5 มา backtest
+anon backtest --csv data/BTCUSD_H1.csv --events  # หรือจากไฟล์ CSV
+anon export --days 365 --out data/BTCUSD_H1.csv  # เก็บประวัติ H1 เป็น CSV (เวลา UTC)
 anon report --journal journal/anon_journal.jsonl # ฟอร์ม #Txx + สถิติ
-anon --config config/anon.toml live              # MT5 dry-run: คำนวณทุกอย่าง แต่ไม่ส่งออเดอร์
-anon --config config/anon.toml live --confirm-live   # ส่งจริง: ต้องตั้ง dry_run=false ด้วย
+anon live                                        # MT5 dry-run: คำนวณทุกอย่าง แต่ไม่ส่งออเดอร์
+anon live --confirm-live                         # ส่งจริง: ต้องมี dry_run=false และ confirmed_by
 ```
 
-ไฟล์ CSV: ใน MT5 เปิด View → Symbols → Bars เลือก BTCUSD H1 แล้วกด Export ได้เลย โปรแกรมอ่านรูปแบบนี้ได้ตรง ๆ
+ทุกคำสั่งรับ `--config config/anon.toml` ได้ (ใส่ก่อนชื่อคำสั่ง)
+เวลาเซิร์ฟเวอร์ของโบรกเกอร์หาเองจากราคาล่าสุด (`server_utc_offset_hours = "auto"`)
+backtest จะไม่ยอมเขียนทับ journal ของ live
 
 ## อินดิเคเตอร์บนกราฟ MT5: `ANON_Levels_v2`
 
@@ -103,8 +123,8 @@ H1 ปิดล่าสุด 84,580.0 · ในเทา → NO CHASE
 
 | ด่าน | ผ่านเมื่อ |
 |---|---|
-| 1. `anon math` | เจ้าของยืนยันค่าที่ "ต้องยืนยัน" ครบ และขนาดพอร์ตรองรับ 0.5%/ไม้ได้ |
-| 2. backtest ข้อมูลจริง | มีไม้ตามแผน ≥ 30 ไม้ และ E[R] > 0 (ถ้ายังไม่ถึง ห้ามสรุป) |
+| 1. `anon doctor` + `anon math --mt5` | เจ้าของเคาะค่าที่ "ต้องยืนยัน" ครบ (ใส่ชื่อใน `confirmed_by`) และขนาดพอร์ตรองรับ 0.5%/ไม้ได้ |
+| 2. `anon backtest --mt5` | มีไม้ตามแผน ≥ 30 ไม้ และ E[R] > 0 (ถ้ายังไม่ถึง ห้ามสรุป) |
 | 3. `live` dry-run บนบัญชี demo | log ตรงกับที่ Ghost ควรเรียก โดยไม่มี error อย่างน้อย 1–2 สัปดาห์ |
 | 4. `--confirm-live` + `approval = "manual"` | ทุกไม้ต้องมีคนพิมพ์อนุมัติ |
 | 5. `approval = "auto"` | ระบบจะไม่ยอมเริ่มจนกว่า Quant ผ่าน: n ≥ 30, E[R] > 0, P(edge>0) ≥ 0.9 |

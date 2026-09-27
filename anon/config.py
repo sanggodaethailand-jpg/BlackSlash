@@ -83,7 +83,8 @@ class ExecutionConfig:
     live_auto_min_prob: float = 0.9
     dry_run: bool = True
     deviation: int = 50
-    server_utc_offset_hours: float = 0.0  # MT5 server clock minus UTC
+    server_utc_offset_hours: float | str = "auto"  # MT5 server clock minus UTC; "auto" = read from the live tick
+    confirmed_by: str = ""  # owner/head who confirmed the "ต้องยืนยัน" values; required to send real orders
     day_utc_offset_hours: float = 7.0  # daily caps reset at midnight Asia/Bangkok
     contract_size: float = 1.0  # paper/backtest only; live reads it from the broker
     volume_min: float = 0.01
@@ -116,6 +117,28 @@ class Config:
             raise ValueError("risk_per_trade_pct must be > 0 and <= daily_loss_pct")
         if self.ghost.min_rr <= 0:
             raise ValueError("min_rr must be > 0")
+        offset = self.execution.server_utc_offset_hours
+        if isinstance(offset, str) and offset != "auto":
+            raise ValueError('server_utc_offset_hours must be a number or "auto"')
+
+
+def unconfirmed_values(cfg: Config) -> list[str]:
+    """Values the handoff left open; the owner must confirm them before real orders."""
+    items = [
+        f"levels.gray_half_width = {cfg.levels.gray_half_width} (เทา {cfg.levels.gray_low:.0f}–{cfg.levels.gray_high:.0f})",
+        f"ghost.min_rr = {cfg.ghost.min_rr}",
+        f"zen.cooldown_bars_after_loss = {cfg.zen.cooldown_bars_after_loss}",
+        f"omega.unfavorable_action = {cfg.omega.unfavorable_action}",
+    ]
+    if cfg.execution.server_utc_offset_hours != "auto":
+        items.append(f"execution.server_utc_offset_hours = {cfg.execution.server_utc_offset_hours}")
+    return items
+
+
+def static_offset_hours(cfg: Config) -> float:
+    """Server offset for offline data (CSV); "auto" can only be resolved against a live terminal."""
+    offset = cfg.execution.server_utc_offset_hours
+    return 0.0 if isinstance(offset, str) else float(offset)
 
 
 def _build(cls: type, data: dict[str, Any]) -> Any:

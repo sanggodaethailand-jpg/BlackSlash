@@ -1,25 +1,47 @@
-"""Command line: math | backtest | demo | report | live"""
+"""Command line: doctor | math | export | backtest | demo | report | live"""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
+import os
+import platform
 import sys
 import time
 from dataclasses import replace
 from pathlib import Path
 
-from anon.config import Config, load_config
+from anon.config import Config, load_config, static_offset_hours, unconfirmed_values
 from anon.quant import Journal, auto_live_allowed, compute_stats, format_report
 
 log = logging.getLogger("anon")
 
 
-def cmd_math(cfg: Config, equity: float, usdthb: float | None) -> None:
+def _mt5(cfg: Config):
+    from anon.broker.mt5 import MT5Broker
+
+    broker = MT5Broker(cfg.execution)
+    broker.connect()
+    return broker
+
+
+def cmd_math(cfg: Config, equity: float, usdthb: float | None, use_mt5: bool) -> None:
+    if use_mt5:
+        broker = _mt5(cfg)
+        try:
+            spec, account = broker.spec(), broker.account()
+            bid, ask = broker.quote()
+        finally:
+            broker.shutdown()
+        equity = account.equity
+        cfg = replace(cfg, execution=replace(cfg.execution, contract_size=spec.contract_size, spread=ask - bid))
+        print(f"จาก MT5: equity {equity:,.2f} {account.currency} · contract size {spec.contract_size} · spread {ask - bid:.1f}")
     lv, rk, ex, g = cfg.levels, cfg.risk, cfg.execution, cfg.ghost
     per_point = rk.lot * ex.contract_size
-    print(f"สมมติ contract size {ex.contract_size} → lot {rk.lot} = {per_point} {'USD'} ต่อ 1 จุด (เช็ก Specification ใน MT5)")
+    source = "จากโบรกเกอร์" if use_mt5 else "สมมติ — ใช้ --mt5 เพื่ออ่านค่าจริง"
+    print(f"contract size {ex.contract_size} ({source}) → lot {rk.lot} = {per_point} ต่อ 1 จุด")
     max_stop = equity * rk.risk_per_trade_pct / 100 / per_point
     print(f"พอร์ต {equity:,.0f} USD → stop ได้ไกลสุด {max_stop:,.0f} จุด ต่อไม้ (≤{rk.risk_per_trade_pct}%)")
     a_stop = lv.a_zone_bot - g.stop_buffer
@@ -38,13 +60,136 @@ def cmd_math(cfg: Config, equity: float, usdthb: float | None) -> None:
         print(f"10,000 บาท/วัน ที่ lot {rk.lot}: ต้องได้ {pts:,.0f} จุดต่อวัน → VETO ถูกต้อง (ไม่ใช้เป็น KPI)")
 
 
-def cmd_backtest(cfg: Config, csv_path: str, journal_path: str | None, show_events: bool) -> None:
-    from anon.backtest import run_backtest
-    from anon.data import load_bars
+def _fresh_backtest_journal(cfg: Config, journal_path: str | None) -> Journal | None:
+    if not journal_path:
+        return None
+    path = Path(journal_path)
+    if path.resolve() == Path(cfg.execution.journal_path).resolve():
+        sys.exit("backtest ห้ามเขียนทับ journal ของ live — ใช้ไฟล์อื่น เช่น journal/backtest.jsonl")
+    if path.exists():
+        path.unlink()  # a backtest is reproducible; start its journal clean
+    return Journal(path)
 
-    bars = load_bars(csv_path, cfg.execution.server_utc_offset_hours)
-    result = run_backtest(cfg, bars, Journal(journal_path) if journal_path else None)
-    _print_result(result, show_events, f"{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d}")
+
+def cmd_backtest(
+    cfg: Config, csv_path: str | None, days: int | None, journal_path: str | None, show_events: bool
+) -> None:
+    from anon.backtest import run_backtest
+
+    spec = spread = balance = None
+    if csv_path:
+        from anon.data import load_bars
+
+        bars = load_bars(csv_path, static_offset_hours(cfg))
+        source = csv_path
+    else:
+        broker = _mt5(cfg)
+        try:
+            bars = broker.closed_bars(days * 24)
+            spec, account = broker.spec(), broker.account()
+            bid, ask = broker.quote()
+        finally:
+            broker.shutdown()
+        spread, balance = ask - bid, account.equity
+        source = f"MT5 {cfg.execution.symbol} H1 {days} วัน (spread ตอนนี้ {spread:.1f}, เริ่มที่ equity จริง {balance:,.2f})"
+    if not bars:
+        sys.exit("ไม่มีแท่งให้ backtest")
+    result = run_backtest(
+        cfg, bars, _fresh_backtest_journal(cfg, journal_path), spec=spec, spread=spread, starting_balance=balance
+    )
+    _print_result(result, show_events, f"{source}\n{len(bars)} bars {bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d}")
+    if result.stats.n < cfg.execution.live_auto_min_n:
+        print(f"\n⚠️ ไม้ตามแผน n={result.stats.n} < {cfg.execution.live_auto_min_n} — ยังสรุปไม่ได้ว่าระบบได้เปรียบ")
+
+
+def cmd_export(cfg: Config, days: int, out: str) -> None:
+    broker = _mt5(cfg)
+    try:
+        bars = broker.closed_bars(days * 24)
+    finally:
+        broker.shutdown()
+    path = Path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["time", "open", "high", "low", "close"])
+        for b in bars:
+            writer.writerow([b.time.isoformat(), b.open, b.high, b.low, b.close])
+    print(f"บันทึก {len(bars)} แท่ง (เวลา UTC) → {path}")
+
+
+def cmd_doctor(cfg: Config) -> int:
+    problems = 0
+
+    def row(ok: bool | None, text: str) -> None:
+        nonlocal problems
+        mark = {True: "OK ", False: "XX ", None: "!! "}[ok]
+        problems += ok is False
+        print(f"[{mark}] {text}")
+
+    row(sys.version_info >= (3, 11), f"Python {platform.python_version()} ({sys.executable})")
+    ex = cfg.execution
+    row(True, f"โหมด dry_run={ex.dry_run} · approval={ex.approval} · journal {ex.journal_path}")
+    if ex.confirmed_by:
+        row(True, f"ค่าที่ต้องยืนยันถูกเคาะแล้วโดย: {ex.confirmed_by}")
+    else:
+        row(None, "ยังไม่มีคนเคาะค่าที่ต้องยืนยัน (execution.confirmed_by ว่าง) → ส่งออเดอร์จริงไม่ได้")
+        for item in unconfirmed_values(cfg):
+            print(f"        - {item}")
+
+    if cfg.omega.ai_enabled:
+        try:
+            import anthropic  # noqa: F401
+
+            has_sdk = True
+        except ImportError:
+            has_sdk = False
+        has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        row(has_sdk, "anthropic SDK ติดตั้งแล้ว" if has_sdk else "ต้อง pip install anthropic")
+        key_note = "มี credential ของ Claude" if has_key else "ไม่เห็น ANTHROPIC_API_KEY (ถ้าใช้ ant auth login อยู่แล้วข้ามได้)"
+        row(has_key or None, key_note)
+    else:
+        row(True, "Ω AI ปิดอยู่ (ใช้ EMA/ATR อย่างเดียว)")
+
+    try:
+        import MetaTrader5  # noqa: F401
+    except ImportError:
+        row(False, "ไม่มีแพ็กเกจ MetaTrader5 (pip install MetaTrader5 — ใช้ได้บน Windows)")
+        return problems
+    try:
+        broker = _mt5(cfg)
+    except Exception as exc:  # noqa: BLE001 - report every connection failure the same way
+        row(False, f"ต่อ MT5 ไม่ได้: {exc} (เปิด MT5 และล็อกอินไว้ก่อน)")
+        return problems
+    try:
+        info = broker.mt5.account_info()
+        mode = {0: "DEMO", 1: "CONTEST", 2: "REAL"}.get(int(info.trade_mode), str(info.trade_mode))
+        row(True, f"บัญชี {info.login} @ {info.server} · {mode} · {info.currency} · "
+                  f"balance {info.balance:,.2f} equity {info.equity:,.2f}")
+        if mode == "REAL" and not ex.dry_run:
+            row(None, "บัญชีจริง + dry_run=false → ทุกไม้จะใช้เงินจริง")
+        spec = broker.spec()
+        row(True, f"{ex.symbol}: contract size {spec.contract_size} · lot min {spec.volume_min} step {spec.volume_step}")
+        steps = cfg.risk.lot / spec.volume_step
+        tradable = cfg.risk.lot >= spec.volume_min - 1e-9 and abs(steps - round(steps)) < 1e-6
+        row(tradable, f"lot {cfg.risk.lot} {'ส่งได้' if tradable else 'ส่งไม่ได้'}กับโบรกเกอร์นี้")
+        bid, ask = broker.quote()
+        offset_h = broker.offset.total_seconds() / 3600
+        row(True, f"ราคา bid {bid:,.1f} ask {ask:,.1f} · spread {ask - bid:.1f} · เวลาเซิร์ฟเวอร์ UTC{offset_h:+.1f}")
+        bars = broker.closed_bars(24 * 365)
+        enough = len(bars) >= cfg.omega.ema_slow + 1
+        row(enough, f"ประวัติ H1: {len(bars)} แท่ง ({bars[0].time:%Y-%m-%d} → {bars[-1].time:%Y-%m-%d})" if bars else "ไม่มีประวัติ H1")
+        for p in broker.positions():
+            if p.ticket in cfg.risk.veto_tickets:
+                row(None, f"#{p.ticket} {p.side} {p.volume} ยังเปิดอยู่ → Risk จะ VETO ไม้ใหม่จนกว่าจะปิด")
+            elif p.magic != ex.magic:
+                row(None, f"#{p.ticket} {p.side} {p.volume} เป็นไม้นอกระบบ → Risk จะ VETO ไม้ใหม่")
+            else:
+                row(True, f"#{p.ticket} ไม้ตามแผน SL {p.sl} TP {p.tp}")
+    finally:
+        broker.shutdown()
+    print("\nพร้อม" if problems == 0 else f"\nมีปัญหา {problems} ข้อ")
+    return problems
 
 
 def cmd_demo(cfg: Config) -> None:
@@ -87,6 +232,8 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
     from anon.engine import Engine
 
     ex = cfg.execution
+    if confirm_live and not ex.dry_run and not ex.confirmed_by:
+        sys.exit("ส่งออเดอร์จริงไม่ได้: ใส่ชื่อคนเคาะค่าใน execution.confirmed_by ก่อน (ดู anon doctor)")
     if not confirm_live and not ex.dry_run:
         print("ไม่มี --confirm-live → บังคับ dry-run")
     if not confirm_live:
@@ -140,12 +287,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=None, help="TOML config (default: built-in handoff values)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("doctor", help="ตรวจความพร้อม: Python, config, MT5, บัญชี, สัญลักษณ์, ไม้ที่เปิด")
+
     p = sub.add_parser("math", help="พิสูจน์ตัวเลข Risk จาก config")
     p.add_argument("--equity", type=float, default=1000.0)
     p.add_argument("--usdthb", type=float, default=None)
+    p.add_argument("--mt5", action="store_true", help="read equity, contract size and spread from MT5")
 
-    p = sub.add_parser("backtest", help="replay CSV bars through the full pipeline")
-    p.add_argument("--csv", required=True)
+    p = sub.add_parser("export", help="save closed H1 bars from MT5 to CSV (UTC)")
+    p.add_argument("--days", type=int, default=365)
+    p.add_argument("--out", default="data/BTCUSD_H1.csv")
+
+    p = sub.add_parser("backtest", help="replay H1 bars (CSV or MT5 history) through the full pipeline")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--csv")
+    src.add_argument("--mt5", action="store_true", help="pull history straight from MT5")
+    p.add_argument("--days", type=int, default=365)
     p.add_argument("--journal", default=None)
     p.add_argument("--events", action="store_true")
 
@@ -161,10 +318,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    if args.cmd == "math":
-        cmd_math(cfg, args.equity, args.usdthb)
+    if args.cmd == "doctor":
+        sys.exit(1 if cmd_doctor(cfg) else 0)
+    elif args.cmd == "math":
+        cmd_math(cfg, args.equity, args.usdthb, args.mt5)
+    elif args.cmd == "export":
+        cmd_export(cfg, args.days, args.out)
     elif args.cmd == "backtest":
-        cmd_backtest(cfg, args.csv, args.journal, args.events)
+        cmd_backtest(cfg, args.csv, args.days if args.mt5 else None, args.journal, args.events)
     elif args.cmd == "demo":
         cmd_demo(cfg)
     elif args.cmd == "report":

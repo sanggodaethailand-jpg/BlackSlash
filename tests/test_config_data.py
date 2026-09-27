@@ -15,6 +15,14 @@ def test_example_config_loads_and_matches_handoff():
     assert cfg.levels.gray_low == 84550 and cfg.levels.gray_high == 84850
     assert cfg.risk.veto_tickets == (208190412,)
     assert cfg.risk.lot == 0.01 and cfg.execution.dry_run is True
+    assert cfg.execution.server_utc_offset_hours == "auto" and cfg.execution.confirmed_by == ""
+
+
+def test_bad_offset_string_rejected(tmp_path):
+    p = tmp_path / "bad.toml"
+    p.write_text('[execution]\nserver_utc_offset_hours = "bangkok"\n')
+    with pytest.raises(ValueError, match="auto"):
+        load_config(p)
 
 
 def test_unknown_key_rejected(tmp_path):

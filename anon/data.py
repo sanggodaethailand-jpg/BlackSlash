@@ -20,7 +20,8 @@ def _parse_time(value: str) -> datetime:
 
 
 def load_bars(path: str | Path, server_utc_offset_hours: float = 0.0) -> list[Bar]:
-    """Timestamps in MT5 exports are server time; they are shifted to UTC here."""
+    """MT5 exports (<DATE>/<TIME> columns) are server time and are shifted to UTC here;
+    ISO or epoch ``time`` columns are taken as UTC."""
     text = Path(path).read_text(encoding="utf-8-sig")
     first = text.splitlines()[0] if text else ""
     delimiter = "\t" if "\t" in first else ","
@@ -38,7 +39,7 @@ def load_bars(path: str | Path, server_utc_offset_hours: float = 0.0) -> list[Ba
                 stamp += " " + row[idx["time"]].strip()
             t = _parse_time(stamp) - shift
         else:
-            t = _parse_time(row[idx["time"]]) - shift
+            t = _parse_time(row[idx["time"]])
         bars.append(
             Bar(
                 t,

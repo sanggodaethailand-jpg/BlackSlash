@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 
 from anon.config import ExecutionConfig
@@ -27,7 +28,8 @@ class MT5Broker:
         self.mt5 = mt5_module
         self.cfg = cfg
         self.symbol = cfg.symbol
-        self.offset = timedelta(hours=cfg.server_utc_offset_hours)
+        auto = cfg.server_utc_offset_hours == "auto"
+        self.offset = None if auto else timedelta(hours=float(cfg.server_utc_offset_hours))
         self.sent: list[dict] = []  # every request, sent or dry-run, for audit
 
     # --- session ---------------------------------------------------------
@@ -46,6 +48,17 @@ class MT5Broker:
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
         if not mt5.symbol_select(self.symbol, True):
             raise RuntimeError(f"cannot select {self.symbol}: {mt5.last_error()}")
+        if self.offset is None:
+            self.offset = self.detect_offset()
+            log.info("server clock = UTC%+.1fh (auto)", self.offset.total_seconds() / 3600)
+
+    def detect_offset(self) -> timedelta:
+        """Server time minus UTC, from the latest tick (BTCUSD ticks around the clock), rounded to 30 min."""
+        tick = self.mt5.symbol_info_tick(self.symbol)
+        if tick is None or not tick.time:
+            raise RuntimeError("cannot detect server time offset: no tick; set server_utc_offset_hours manually")
+        half_hours = round((int(tick.time) - time.time()) / 1800)
+        return timedelta(minutes=30 * half_hours)
 
     def shutdown(self) -> None:
         self.mt5.shutdown()

@@ -29,9 +29,17 @@ def run_backtest(
     journal: Journal | None = None,
     ai: AIReviewer | None = None,
     window: int = 300,
+    spec: SymbolSpec | None = None,
+    spread: float | None = None,
+    starting_balance: float | None = None,
 ) -> BacktestResult:
     ex = cfg.execution
-    broker = PaperBroker(SymbolSpec(ex.contract_size, ex.volume_min, ex.volume_step), ex.starting_balance, ex.spread)
+    spec = spec or SymbolSpec(ex.contract_size, ex.volume_min, ex.volume_step)
+    broker = PaperBroker(
+        spec,
+        ex.starting_balance if starting_balance is None else starting_balance,
+        ex.spread if spread is None else spread,
+    )
     journal = journal or Journal(None)
     engine = Engine(cfg, broker, AutoApprover(), journal, ai)
     for i, bar in enumerate(bars):
