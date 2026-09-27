@@ -690,14 +690,26 @@ void EngineMarker(const string id, const datetime t, const double price, const c
 void DrawEngine()
   {
    string ids[5] = {"EA_ABOT", "EA_ATOP", "EA_GRAYL", "EA_GRAYH", "EA_TP1"};
-   bool auto_levels = FeedFresh() && FeedGet("levels_source") == "auto" && FeedGet("levels_ok") == "1";
-   if(auto_levels)
+   double lv[5];
+   lv[0] = StringToDouble(FeedGet("a_bot"));
+   lv[1] = StringToDouble(FeedGet("a_top"));
+   lv[2] = StringToDouble(FeedGet("gray_low"));
+   lv[3] = StringToDouble(FeedGet("gray_high"));
+   lv[4] = StringToDouble(FeedGet("tp1"));
+   bool is_auto = FeedGet("levels_source") == "auto";
+   // Weekly levels set with levels.bat reach the engine, not this indicator's inputs: draw the engine's own
+   // lines whenever they differ from the inputs, so the chart always shows what the engine trades.
+   bool differs = MathAbs(lv[0] - InpAZoneBot) > 0.5 || MathAbs(lv[1] - InpAZoneTop) > 0.5 || MathAbs(lv[2] - GrayLow()) > 0.5
+                  || MathAbs(lv[3] - GrayHigh()) > 0.5 || MathAbs(lv[4] - InpTP1) > 0.5;
+   bool engine_levels = FeedFresh() && FeedGet("levels_ok") == "1" && (is_auto || differs);
+   if(engine_levels)
      {
-      HLine(ids[0], StringToDouble(FeedGet("a_bot")), InpClrAutoLevels, STYLE_DASHDOT, 1, "AUTO A ล่าง " + Px(StringToDouble(FeedGet("a_bot"))));
-      HLine(ids[1], StringToDouble(FeedGet("a_top")), InpClrAutoLevels, STYLE_DASHDOT, 1, "AUTO A บน " + Px(StringToDouble(FeedGet("a_top"))));
-      HLine(ids[2], StringToDouble(FeedGet("gray_low")), InpClrAutoLevels, STYLE_DOT, 1, "AUTO เทา ล่าง " + Px(StringToDouble(FeedGet("gray_low"))));
-      HLine(ids[3], StringToDouble(FeedGet("gray_high")), InpClrAutoLevels, STYLE_DOT, 1, "AUTO เทา บน " + Px(StringToDouble(FeedGet("gray_high"))));
-      HLine(ids[4], StringToDouble(FeedGet("tp1")), InpClrAutoLevels, STYLE_DASHDOT, 2, "AUTO TP1 " + Px(StringToDouble(FeedGet("tp1"))));
+      string tag = is_auto ? "AUTO " : "ENGINE ";
+      HLine(ids[0], lv[0], InpClrAutoLevels, STYLE_DASHDOT, 1, tag + "A ล่าง " + Px(lv[0]));
+      HLine(ids[1], lv[1], InpClrAutoLevels, STYLE_DASHDOT, 1, tag + "A บน " + Px(lv[1]));
+      HLine(ids[2], lv[2], InpClrAutoLevels, STYLE_DOT, 1, tag + "เทา ล่าง " + Px(lv[2]));
+      HLine(ids[3], lv[3], InpClrAutoLevels, STYLE_DOT, 1, tag + "เทา บน " + Px(lv[3]));
+      HLine(ids[4], lv[4], InpClrAutoLevels, STYLE_DASHDOT, 2, tag + "TP1 " + Px(lv[4]));
      }
    else
       for(int i = 0; i < 5; i++)
@@ -738,6 +750,12 @@ void EnginePanel()
         !fresh ? InpClrBad : (mode == "LIVE" ? InpClrWarn : InpClrGood));
    if(FeedGet("symbol") != _Symbol)
       Line("engine ดู " + FeedGet("symbol") + " แต่กราฟนี้คือ " + _Symbol + " — ลูกศร engine จะไม่แสดง", InpClrWarn);
+   string until = FeedGet("levels_until");
+   if(FeedGet("levels_expired") == "1")
+      Line("เส้นราคาหมดอายุ (" + until + ") → engine ไม่เปิดไม้ใหม่ · ตั้งเส้นใหม่ด้วย levels.bat", InpClrBad);
+   else
+      if(StringLen(until) > 0)
+         Line("เส้นราคาของ engine ใช้ได้ถึง " + until, InpClrMuted);
    if(FeedGet("levels_source") == "auto" && FeedGet("levels_ok") != "1")
       Line("ระดับอัตโนมัติ: วันนี้ไม่วาดเส้น (กรอบแคบ/ข้อมูลไม่พอ) → ไม่เทรดวันนี้", InpClrWarn);
 

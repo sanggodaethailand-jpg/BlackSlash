@@ -9,6 +9,7 @@ gray_center = 84700.0     # เทา NO CHASE
 gray_half_width = 150.0   # ต้องยืนยัน: เทา = 84550–84850
 tp1 = 85500.0
 liq_top = 87000.0
+valid_until = ""        # วันสุดท้าย (เวลาไทย) ที่เส้นชุดนี้เปิดไม้ได้ YYYY-MM-DD · ตั้งด้วย levels.bat · "" = ไม่หมดอายุ
 
 [ghost]
 stop_buffer = 50.0        # stop จริง = low ของ sweep/swing ลบค่านี้

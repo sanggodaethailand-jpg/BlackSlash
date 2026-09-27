@@ -76,6 +76,7 @@ class Engine:
         self.started_at: datetime | None = None
         self.last_sync: datetime | None = None
         self.day_key: str | None = None
+        self.expired_noted: str | None = None
         self.day_start_equity: float = 0.0
         self.peak_equity: float = 0.0
 
@@ -251,10 +252,21 @@ class Engine:
                 self._emit(now, "thesis_exit", f"{rec.id} H1 close {close:.1f} < {thesis:.0f}")
 
     # --- trade -----------------------------------------------------------
+    def levels_expired(self, now: datetime) -> bool:
+        """Weekly levels past their last day may still manage open trades but never open new ones."""
+        until = self.cfg.levels.valid_until
+        return bool(until) and not self.cfg.auto.enabled and self._local_day(now) > date.fromisoformat(until)
+
     def _maybe_trade(self, bars: Sequence[Bar], now: datetime) -> None:
         if any(r.status == "open" and r.id.startswith("#T") for r in self.journal.records.values()):
             return
         if not self.levels_ok:
+            return
+        if self.levels_expired(now):
+            if self.expired_noted != self.day_key:
+                self.expired_noted = self.day_key
+                until = self.cfg.levels.valid_until
+                self._emit(now, "levels_expired", f"เส้นราคาหมดอายุ ({until}) → ไม่เปิดไม้ใหม่ จนกว่าจะตั้งเส้นใหม่ (levels.bat)")
             return
         result = self.ghost.evaluate(bars)
         if result.signal is None:
