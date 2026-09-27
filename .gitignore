@@ -6,3 +6,5 @@ __pycache__/
 journal/
 state/
 data/
+config/anon.toml
+config/anon.live.toml
