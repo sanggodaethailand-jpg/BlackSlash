@@ -386,6 +386,34 @@ def cmd_report(journal_path: str) -> None:
     print(format_report(compute_stats(records), records))
 
 
+RECONNECT_MAX_WAIT_S = 120.0
+
+
+def _reconnect(broker, error: Exception, failures: int, poll_s: float, dry_run: bool) -> None:
+    """Wait (longer after each failure), then connect to the terminal again. Never gives up on
+    its own: orders already sent keep their SL/TP at the broker. Stops only on another account."""
+    from anon.broker.mt5 import AccountChanged
+
+    wait = min(RECONNECT_MAX_WAIT_S, max(poll_s, 1.0) * 2 ** min(failures - 1, 6))
+    print(
+        f"MT5 หลุด ({error}) · ลองต่อใหม่ครั้งที่ {failures} ใน {wait:.0f} วินาที · "
+        "ไม้ที่เปิดอยู่ยังมี SL/TP ที่โบรกเกอร์",
+        flush=True,
+    )
+    time.sleep(wait)
+    try:
+        broker.reconnect()
+    except AccountChanged as exc:
+        sys.exit(f"หยุด: {exc}")
+    except RuntimeError as exc:
+        log.warning("reconnect %d failed: %s", failures, exc)
+        return
+    print(f"ต่อ MT5 ได้แล้ว ({broker.symbol}) · ทำงานต่อ", flush=True)
+    terminal = getattr(broker.mt5, "terminal_info", lambda: None)()
+    if not dry_run and getattr(terminal, "trade_allowed", True) is False:
+        print("[!!] Algo Trading ใน MT5 ปิดอยู่หลังต่อใหม่: ไม้ใหม่จะส่งไม่ออก → กดปุ่ม Algo Trading ให้เป็นสีเขียว", flush=True)
+
+
 def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
     from anon.approval import AutoApprover, ManualApprover
     from anon.broker.mt5 import MT5Broker
@@ -432,9 +460,16 @@ def cmd_live(cfg: Config, confirm_live: bool, poll_s: float) -> None:
     print(f"ANON live on {broker.symbol} | dry_run={ex.dry_run} | approval={ex.approval} | AI={'on' if ai else 'off'}")
     print(f"กราฟ: {feed_path if feed else 'ปิด (execution.chart_feed)'}")
     last_bar = None
+    failures = 0
     try:
         while True:
-            bars = broker.closed_bars(300)
+            try:
+                bars = broker.closed_bars(300)
+            except RuntimeError as exc:
+                failures += 1
+                _reconnect(broker, exc, failures, poll_s, ex.dry_run)
+                continue
+            failures = 0
             if bars and bars[-1].time != last_bar:
                 last_bar = bars[-1].time
                 try:
