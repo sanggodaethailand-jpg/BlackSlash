@@ -33,6 +33,10 @@ def suffixed_name(symbol: str, names: list[str]) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+class AccountChanged(RuntimeError):
+    """The terminal came back logged into another account or server: never trade there."""
+
+
 class MT5Broker:
     def __init__(self, cfg: ExecutionConfig, mt5_module=None) -> None:
         if mt5_module is None:
@@ -43,6 +47,7 @@ class MT5Broker:
         auto = cfg.server_utc_offset_hours == "auto"
         self.offset = None if auto else timedelta(hours=float(cfg.server_utc_offset_hours))
         self.sent: list[dict] = []  # every request, sent or dry-run, for audit
+        self.identity: tuple | None = None  # (login, server) of the first connection
 
     # --- session ---------------------------------------------------------
     def connect(self) -> None:
@@ -58,6 +63,17 @@ class MT5Broker:
         ok = mt5.initialize(path, **kwargs) if path else mt5.initialize(**kwargs)
         if not ok:
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
+        info = mt5.account_info()
+        if info is not None:
+            identity = (getattr(info, "login", None), getattr(info, "server", None))
+            if self.identity is None:
+                self.identity = identity
+            elif identity != self.identity:
+                mt5.shutdown()
+                raise AccountChanged(
+                    f"MT5 เปลี่ยนบัญชีระหว่างทำงาน: เดิม {self.identity[0]} @ {self.identity[1]} "
+                    f"ตอนนี้ {identity[0]} @ {identity[1]} → ไม่ทำงานต่อกับบัญชีอื่น"
+                )
         if not mt5.symbol_select(self.symbol, True):
             error = mt5.last_error()
             listing = getattr(mt5, "symbols_get", None)
@@ -83,6 +99,15 @@ class MT5Broker:
 
     def shutdown(self) -> None:
         self.mt5.shutdown()
+
+    def reconnect(self) -> None:
+        """Connect again after the link to the terminal drops (IPC errors, MT5 restarted or
+        updated). Keeps the symbol and clock offset; raises AccountChanged on another account."""
+        try:
+            self.mt5.shutdown()
+        except Exception:  # noqa: BLE001 - the old link is already broken
+            log.debug("shutdown before reconnect failed", exc_info=True)
+        self.connect()
 
     # --- time ------------------------------------------------------------
     def _to_utc(self, server_epoch: int) -> datetime:
