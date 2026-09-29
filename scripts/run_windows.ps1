@@ -10,9 +10,10 @@
 #            runs doctor on it, then the live loop; every trade still needs the typed approval
 #   levels   set this week's levels and their last day in config\anon.toml (levels.bat)
 #   forward  export the newest H1 bars, then the forward watch report (forward.bat)
+#   binance  download Binance BTCUSDT H1 klines with market-buy volume for the lab (binance.bat)
 # Only the golive task can send real orders, and only after the owner types the confirmation.
 param(
-    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research", "golive", "levels", "forward")]
+    [ValidateSet("all", "doctor", "math", "backtest", "report", "dryrun", "research", "golive", "levels", "forward", "binance")]
     [string]$Task = "all",
     [int]$Days = 365
 )
@@ -54,6 +55,11 @@ switch ($Task) {
     "forward"  {
         [void](Anon @("export", "--days", "3650", "--out", "data/BTCUSDc_H1.csv"))
         [void](Anon @("lab", "--forward", "--csv", "data/BTCUSDc_H1.csv"))
+    }
+    "binance"  {
+        # months fixed in research/delta_plan.md before anyone looked at the data
+        [void](Anon @("binance", "--start", "2018-02", "--end", "2026-08", "--out", "data/BTCUSDT_binance_H1.csv"))
+        Write-Host "`nUpload data\BTCUSDT_binance_H1.csv to the GitHub repo (same way as BTCUSDc_H1.csv)." -ForegroundColor Green
     }
     "research" {
         $span = if ($PSBoundParameters.ContainsKey("Days")) { $Days } else { 1825 }

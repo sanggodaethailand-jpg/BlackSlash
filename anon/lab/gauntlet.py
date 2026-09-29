@@ -1,7 +1,8 @@
 """The five gates every idea walks through, in order; the first failure ends the walk.
 
 1. registered in the ledger before any result is seen (k = attempts so far)
-2. history split: the oldest 70% for development, the newest 30% locked away
+2. history split: the oldest 70% for development, the newest 30% locked away (and never later
+   than a lock already on record, whichever dataset of the market it came from)
 3. development part: the pre-registered setting has >= 30 trades and E[R] > 0, most grid
    neighbours are positive, it survives stressed costs, most calendar years are positive,
    and it is still positive without its best year
@@ -17,6 +18,7 @@ import statistics
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
 from anon.lab.core import Costs, Idea, LabStats, grid_cells, idea_hash, lab_stats, simulate, t_stat, validate_idea
@@ -24,7 +26,7 @@ from anon.lab.ledger import Ledger, threshold
 from anon.lab.nulls import KINDS, fake_history
 from anon.models import Bar
 
-LAB_VERSION = 2
+LAB_VERSION = 3  # 3: fill-bar gap stops, swap on time exits, max_wait, flow data
 MIN_DEV_TRADES = 30
 MIN_HOLDOUT_TRADES = 10
 PLATEAU_SHARE = 2 / 3
@@ -171,6 +173,40 @@ def _dev_checks(rep: Report) -> None:
             rep.failed_gate, rep.reason = 3, f"กำไรกระจุกในปีเดียว (ตัดปีที่ดีสุดออกเหลือ {dev.sum_r - best:+.1f}R)"
 
 
+def holdout_cut(bars: Sequence[Bar], ledger: Ledger) -> int:
+    """Index where the locked part starts: the newest HOLDOUT_FRACTION, and never later than a
+    lock already in the ledger, so another dataset of the same market cannot show the locked
+    months in its development part."""
+    cut = int(len(bars) * (1 - HOLDOUT_FRACTION))
+    locks = [
+        datetime.fromisoformat(row["data"]["locked_from"])
+        for row in ledger.rows
+        if row["type"] == "attempt" and "locked_from" in row.get("data", {})
+    ]
+    if locks:
+        first_lock = min(locks)
+        cut = min(cut, next((i for i, b in enumerate(bars) if b.time >= first_lock), len(bars)))
+    return cut
+
+
+def split_data(bars: Sequence[Bar], ledger: Ledger, source: str = "") -> tuple[int, dict[str, Any]]:
+    cut = holdout_cut(bars, ledger)
+    data = {
+        "source": source,
+        "bars": len(bars),
+        "first": bars[0].time.isoformat(),
+        "last": bars[-1].time.isoformat(),
+        "locked_from": bars[cut].time.isoformat(),
+        "flow": has_flow(bars),
+    }
+    return cut, data
+
+
+def has_flow(bars: Sequence[Bar]) -> bool:
+    """Exchange data with market-order volume (anon binance), not MT5 CFD bars."""
+    return any(b.volume > 0 for b in bars)
+
+
 def run_gauntlet(
     idea: Idea,
     bars: Sequence[Bar],
@@ -180,16 +216,17 @@ def run_gauntlet(
     seed: int = 7,
     workers: int = 1,
     progress: Callable[[str], None] | None = None,
+    source: str = "",
 ) -> Report:
     validate_idea(idea)
-    cut = int(len(bars) * (1 - HOLDOUT_FRACTION))
-    dev_bars, digest = bars[:cut], idea_hash(idea)
-    data = {
-        "bars": len(bars),
-        "first": bars[0].time.isoformat(),
-        "last": bars[-1].time.isoformat(),
-        "locked_from": bars[cut].time.isoformat(),
-    }
+    if idea.needs_flow and not has_flow(bars):
+        raise ValueError(f"{idea.name} needs volume/buy_volume columns (anon binance); this data has none")
+    digest = idea_hash(idea)
+    why = ledger.spent(idea.name, digest)
+    if why:
+        raise ValueError(f"{idea.name} ({digest}): {why}")
+    cut, data = split_data(bars, ledger, source)
+    dev_bars = bars[:cut]
     # gate 1: the attempt is on record before anything is measured
     k = ledger.register(idea.name, digest, idea.primary, idea.grid, data)
     rep = Report(idea.name, idea.family, idea.hypothesis, digest, k, threshold(k), data, costs, primary=dict(idea.primary))

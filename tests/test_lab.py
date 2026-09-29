@@ -229,8 +229,10 @@ def registered_and_template():
 
 
 def market_like(n=16000, seed=4):
-    """Volatility regimes and occasional 4% jumps, so every kind of idea finds trades."""
-    rng = random.Random(seed)
+    """Volatility regimes and occasional 4% jumps, so every kind of idea finds trades. Each bar
+    also has exchange-style flow (volume, a noisy share of market buys), drawn from a separate
+    generator so the prices are the same as without it."""
+    rng, flow_rng = random.Random(seed), random.Random(seed + 1000)
     out, price, vol = [], 20000.0, 0.004
     t0 = datetime(2021, 1, 4, tzinfo=UTC)
     for i in range(n):
@@ -239,8 +241,11 @@ def market_like(n=16000, seed=4):
         r = rng.gauss(0, vol) + (rng.choice([-1, 1]) * 0.04 if rng.random() < 0.002 else 0.0)
         close = price * math.exp(r)
         wick = abs(rng.gauss(0, vol)) * price
-        out.append(bars_from([(price, max(price, close) + wick, min(price, close) - wick * rng.random(), close)],
-                             t0 + (datetime(2021, 1, 4, 1, tzinfo=UTC) - t0) * i)[0])
+        bar = bars_from([(price, max(price, close) + wick, min(price, close) - wick * rng.random(), close)],
+                        t0 + (datetime(2021, 1, 4, 1, tzinfo=UTC) - t0) * i)[0]
+        volume = 100 * math.exp(flow_rng.gauss(0, 0.5)) * (1 + 50 * abs(r))
+        share = min(0.98, max(0.02, flow_rng.gauss(0.5, 0.06)))
+        out.append(replace(bar, volume=volume, buy_volume=volume * share))
         price = close
     return out
 
@@ -376,8 +381,10 @@ def test_a_planted_edge_walks_through_all_five_gates(tmp_path):
     assert rep.holdout is not None and rep.holdout.expectancy_r > 0 and rep.holdout_opening == 1
     assert rep.stressed.expectancy_r > 0 and messages[-1] == "  signflip: 40/40"
     assert "✅" in format_report(rep) and ledger.results()[("ten_oclock", rep.digest)]["passed"] is True
-    again = run_gauntlet(TenOClock(), planted_edge(), Costs(spread=10.0), ledger, trials=40)
-    assert again.holdout_opening == 2 and "เปิดครั้งที่ 2" in format_report(again)
+    rows = len(ledger.rows)
+    with pytest.raises(ValueError, match="มีผลในสมุดแล้ว"):  # judged once: never rerun, on any data
+        run_gauntlet(TenOClock(), planted_edge(), Costs(spread=10.0), ledger, trials=40)
+    assert len(ledger.rows) == rows
 
 
 def test_concentrated_or_unstable_profits_fail_gate_three():

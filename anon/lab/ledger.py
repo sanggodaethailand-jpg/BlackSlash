@@ -55,12 +55,31 @@ class Ledger:
     def holdout_openings(self, idea: str) -> int:
         return sum(1 for row in self.rows if row["type"] == "holdout" and row["idea"] == idea)
 
+    def _opened(self, idea: str, digest: str) -> bool:
+        return any(r["type"] == "holdout" and r["idea"] == idea and r.get("hash") == digest for r in self.rows)
+
     def record_holdout(self, idea: str, digest: str, params: dict) -> int:
+        """The locked part opens once per attempt, and never after the attempt was judged."""
+        if self._opened(idea, digest) or (idea, digest) in self.results():
+            raise ValueError(f"{idea} ({digest}): ช่วงล็อกของ attempt นี้เปิดหรือตัดสินไปแล้ว เปิดซ้ำไม่ได้")
         self._append({"type": "holdout", "idea": idea, "hash": digest, "params": params})
         return self.holdout_openings(idea)
 
     def record_result(self, idea: str, digest: str, result: dict[str, Any]) -> None:
+        """One verdict per attempt."""
+        if (idea, digest) in self.results():
+            raise ValueError(f"{idea} ({digest}): มีผลในสมุดแล้ว บันทึกซ้ำไม่ได้")
         self._append({"type": "result", "idea": idea, "hash": digest, **result})
+
+    def spent(self, idea: str, digest: str) -> str | None:
+        """Why this exact attempt may never run again (on any data), or None."""
+        res = self.results().get((idea, digest))
+        if res is not None:
+            verdict = "✅ ผ่าน" if res.get("passed") else f"❌ ตกด่าน {res.get('failed_gate')}"
+            return f"มีผลในสมุดแล้ว ({verdict}) → ไม่รันซ้ำ ทั้งกับข้อมูลเดิมและข้อมูลชุดอื่น"
+        if self._opened(idea, digest):
+            return "เปิดช่วงล็อกไปแล้วแต่ไม่มีผลบันทึก (โปรแกรมหยุดกลางทาง) → นับว่าใช้ไปแล้ว ต้องเขียนเป็นไอเดียใหม่"
+        return None
 
     def results(self) -> dict[tuple[str, str], dict[str, Any]]:
         out: dict[tuple[str, str], dict[str, Any]] = {}

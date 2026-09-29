@@ -1,4 +1,5 @@
-"""Load H1 bars from CSV: MT5 "Export Bars" files or a plain time,open,high,low,close file."""
+"""Load H1 bars from CSV: MT5 "Export Bars" files or a plain time,open,high,low,close file
+(plus volume,buy_volume for exchange klines written by ``anon binance``)."""
 
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ def load_bars(path: str | Path, server_utc_offset_hours: float = 0.0) -> list[Ba
     rows = list(csv.reader(text.splitlines(), delimiter=delimiter))
     header = [h.strip().strip("<>").lower() for h in rows[0]]
     idx = {name: i for i, name in enumerate(header)}
+    flow = "volume" in idx and "buy_volume" in idx  # exchange klines (anon binance); MT5 exports have neither
     shift = timedelta(hours=server_utc_offset_hours)
     bars: list[Bar] = []
     for row in rows[1:]:
@@ -47,6 +49,8 @@ def load_bars(path: str | Path, server_utc_offset_hours: float = 0.0) -> list[Ba
                 float(row[idx["high"]]),
                 float(row[idx["low"]]),
                 float(row[idx["close"]]),
+                float(row[idx["volume"]]) if flow else 0.0,
+                float(row[idx["buy_volume"]]) if flow else 0.0,
             )
         )
     bars.sort(key=lambda b: b.time)
