@@ -133,7 +133,7 @@ def cmd_lab(
 ) -> None:
     from anon.data import load_bars
     from anon.lab.core import Costs, idea_hash
-    from anon.lab.gauntlet import HOLDOUT_FRACTION, format_report, run_gauntlet
+    from anon.lab.gauntlet import format_report, has_flow, run_gauntlet, split_data
     from anon.lab.ideas import load_ideas
     from anon.lab.ledger import Ledger, threshold
 
@@ -181,9 +181,21 @@ def cmd_lab(
                   tuple(lab.swap_days), lab.rollover, lab.commission)
     if smoke:
         print("ทดลองเครื่อง: รันแม่แบบ ไม่บันทึกลงสมุด ผลนี้ไม่ใช่หลักฐานอะไร\n")
-    cut = int(len(bars) * (1 - HOLDOUT_FRACTION))
-    data = {"bars": len(bars), "first": bars[0].time.isoformat(), "last": bars[-1].time.isoformat(),
-            "locked_from": bars[cut].time.isoformat()}
+    done, flow = ledger.results(), has_flow(bars)
+    for name, idea in list(ideas.items()):
+        res = done.get((idea.name, idea_hash(idea)))
+        if res is not None:  # judged once; running it on other data would be an unregistered retest
+            verdict = "✅ ผ่าน" if res["passed"] else f"❌ ตกด่าน {res['failed_gate']}"
+            print(f"{name}: มีผลในสมุดแล้ว ({verdict}) → ไม่รันซ้ำ ทั้งกับข้อมูลเดิมและข้อมูลชุดอื่น")
+            del ideas[name]
+        elif idea.needs_flow and not flow:
+            print(f"{name}: ต้องใช้ข้อมูลที่มี volume/buy_volume (anon binance) → ไม่ลงทะเบียน ไม่รัน")
+            del ideas[name]
+    if not ideas:
+        print("ไม่มีไอเดียที่ต้องรันกับข้อมูลชุดนี้")
+        return
+    source = Path(csv_path).name
+    _, data = split_data(bars, ledger, source)
     for idea in ideas.values():  # the whole round is on record before the first result
         ledger.register(idea.name, idea_hash(idea), idea.primary, idea.grid, data)
     k = len(ledger.attempts())
@@ -191,7 +203,7 @@ def cmd_lab(
     for idea in ideas.values():
         print(f"กำลังทดสอบ {idea.name} ...", flush=True)
         report = run_gauntlet(idea, bars, costs, ledger, trials=trials, workers=workers,
-                              progress=lambda msg: print(msg, flush=True))
+                              progress=lambda msg: print(msg, flush=True), source=source)
         print(format_report(report), flush=True)
         print()
 
@@ -540,6 +552,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--days", type=int, default=365)
     p.add_argument("--out", default="data/BTCUSD_H1.csv")
 
+    p = sub.add_parser("binance", help="download Binance spot H1 klines with market-buy volume (for flow ideas)")
+    p.add_argument("--symbol", default="BTCUSDT")
+    p.add_argument("--start", default="2018-02", help="first month YYYY-MM")
+    p.add_argument("--end", required=True, help="last month YYYY-MM (fixed in advance, see research/delta_plan.md)")
+    p.add_argument("--out", default="data/BTCUSDT_binance_H1.csv")
+
     p = sub.add_parser("backtest", help="replay H1 bars (CSV or MT5 history) through the full pipeline")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv")
@@ -582,6 +600,13 @@ def main(argv: list[str] | None = None) -> None:
         cmd_lab(cfg, args.csv, names, args.trials, args.list, args.smoke, args.workers, args.forward)
     elif args.cmd == "export":
         cmd_export(cfg, args.days, args.out)
+    elif args.cmd == "binance":
+        from anon.binance import DownloadError, download
+
+        try:
+            download(args.symbol, args.start, args.end, args.out)
+        except (DownloadError, ValueError) as exc:
+            sys.exit(f"หยุด: {exc}")
     elif args.cmd == "backtest":
         cmd_backtest(
             cfg, args.csv, args.days if args.mt5 else None, args.journal, args.events, args.auto, args.min_rr, args.summary

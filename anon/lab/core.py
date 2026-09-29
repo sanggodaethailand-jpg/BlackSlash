@@ -100,6 +100,7 @@ class Idea:
     hypothesis: str = ""  # why the market should pay this rule, and who pays
     primary: dict[str, Any] = {}  # the one pre-registered setting that faces the null test
     grid: dict[str, list[Any]] = {}  # neighbours for the plateau check, at most MAX_GRID cells
+    needs_flow: bool = False  # reads Bar.volume / Bar.buy_volume: runs only on exchange data (anon binance)
 
     def prepare(self, bars: Sequence[Bar], p: dict[str, Any]) -> Any:
         return None

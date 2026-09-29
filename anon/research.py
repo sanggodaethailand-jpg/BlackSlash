@@ -117,18 +117,19 @@ def shuffled_bars(bars: Sequence[Bar], rng: random.Random) -> list[Bar]:
 
     Each bar is kept as ratios (gap from the previous close, high/low/close relative to its
     open) and the ratios are replayed in shuffled order from the same starting price, so the
-    shuffled path also ends at the same final price."""
+    shuffled path also ends at the same final price. A bar's volume and buy volume travel
+    with its shape."""
     shapes = []
     prev_close = bars[0].open
     for b in bars:
-        shapes.append((b.open / prev_close, b.high / b.open, b.low / b.open, b.close / b.open))
+        shapes.append((b.open / prev_close, b.high / b.open, b.low / b.open, b.close / b.open, b.volume, b.buy_volume))
         prev_close = b.close
     rng.shuffle(shapes)
     out: list[Bar] = []
     price = bars[0].open
-    for b, (gap, high, low, close) in zip(bars, shapes, strict=True):
+    for b, (gap, high, low, close, volume, buy_volume) in zip(bars, shapes, strict=True):
         o = price * gap
-        out.append(Bar(b.time, o, o * high, o * low, o * close))
+        out.append(Bar(b.time, o, o * high, o * low, o * close, volume, buy_volume))
         price = o * close
     return out
 

@@ -14,13 +14,18 @@ H1 = timedelta(hours=1)
 
 @dataclass(frozen=True)
 class Bar:
-    """One closed H1 candle. ``time`` is the bar open time (UTC, tz-aware); prices are bid."""
+    """One closed H1 candle. ``time`` is the bar open time (UTC, tz-aware); prices are bid.
+
+    ``volume`` / ``buy_volume`` (base units traded, and the part bought by market orders)
+    exist only for exchange data such as Binance klines; MT5 CFD bars leave them at 0."""
 
     time: datetime
     open: float
     high: float
     low: float
     close: float
+    volume: float = 0.0
+    buy_volume: float = 0.0
 
     @property
     def close_time(self) -> datetime:

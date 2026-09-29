@@ -229,8 +229,10 @@ def registered_and_template():
 
 
 def market_like(n=16000, seed=4):
-    """Volatility regimes and occasional 4% jumps, so every kind of idea finds trades."""
-    rng = random.Random(seed)
+    """Volatility regimes and occasional 4% jumps, so every kind of idea finds trades. Each bar
+    also has exchange-style flow (volume, a noisy share of market buys), drawn from a separate
+    generator so the prices are the same as without it."""
+    rng, flow_rng = random.Random(seed), random.Random(seed + 1000)
     out, price, vol = [], 20000.0, 0.004
     t0 = datetime(2021, 1, 4, tzinfo=UTC)
     for i in range(n):
@@ -239,8 +241,11 @@ def market_like(n=16000, seed=4):
         r = rng.gauss(0, vol) + (rng.choice([-1, 1]) * 0.04 if rng.random() < 0.002 else 0.0)
         close = price * math.exp(r)
         wick = abs(rng.gauss(0, vol)) * price
-        out.append(bars_from([(price, max(price, close) + wick, min(price, close) - wick * rng.random(), close)],
-                             t0 + (datetime(2021, 1, 4, 1, tzinfo=UTC) - t0) * i)[0])
+        bar = bars_from([(price, max(price, close) + wick, min(price, close) - wick * rng.random(), close)],
+                        t0 + (datetime(2021, 1, 4, 1, tzinfo=UTC) - t0) * i)[0]
+        volume = 100 * math.exp(flow_rng.gauss(0, 0.5)) * (1 + 50 * abs(r))
+        share = min(0.98, max(0.02, flow_rng.gauss(0.5, 0.06)))
+        out.append(replace(bar, volume=volume, buy_volume=volume * share))
         price = close
     return out
 
