@@ -5,11 +5,13 @@ Execution model, kept deliberately conservative:
 - bars are bid prices: a buy fills at ask (bid + spread) and exits at bid, a sell the reverse;
 - slippage moves every fill and every exit against the trade;
 - a stop and a target inside the same bar count as the stop;
-- a gap through the stop fills at the open, i.e. worse than the stop, on the fill bar too
-  (a buy filled at the ask whose bid already opens under the stop is out at that bid);
+- a gap through the stop fills at the open, i.e. worse than the stop;
+- an entry whose stop is already at or past the price it would exit at when it fills (the
+  bid for a buy, the ask for a sell) is refused, as a broker refuses "invalid stops";
 - swap is charged at the broker's rollover (17:00 New York by default, Friday x3, weekend 0),
   as a yearly rate on the fill price so it scales with price across the years; every rollover
-  up to and including the exit time is charged, missing hours included;
+  after the fill up to and including the exit time is charged, missing hours and the last
+  bar of the data included;
 - R is measured from the real fill to the initial stop, so spread is inside every R.
 """
 
@@ -183,6 +185,15 @@ class Costs:
     def rollover_at(self, day: date) -> datetime:
         return new_york_rollover(day) if self.rollover == "new_york" else datetime(day.year, day.month, day.day, tzinfo=UTC)
 
+    def rollovers_between(self, after: datetime, until: datetime) -> float:
+        """Swap multiplier of the rollovers in (after, until]."""
+        total, day = 0.0, after.date()
+        while day <= until.date():
+            if after < self.rollover_at(day) <= until:
+                total += self.swap_days[day.weekday()]
+            day += timedelta(days=1)
+        return total
+
     def rollover_weights(self, bars: Sequence[Bar]) -> list[float]:
         """weights[i] = swap multiplier of the rollovers after the open of bar i-1, up to the open of bar i."""
         weights = [0.0] * len(bars)
@@ -237,7 +248,8 @@ def _open(e: Entry, i: int, bars: Sequence[Bar], costs: Costs) -> Trade | None:
     target = e.target
     if e.target_r is not None:
         target = fill + e.target_r * (fill - stop) if buy else fill - e.target_r * (stop - fill)
-    ok = stop < fill if buy else stop > fill
+    quote = bar.open if buy else bar.open + costs.spread  # where the position would be closed right now
+    ok = stop < quote if buy else stop > quote  # else the broker refuses it: "invalid stops"
     if ok and target is not None:
         ok = target > fill if buy else target < fill
     return Trade(e.side, i, fill, stop, stop, target, e.max_hold) if ok else None
@@ -272,7 +284,7 @@ def simulate(idea: Idea, p: dict[str, Any], bars: Sequence[Bar], costs: Costs) -
                 lo, hi, open_ = bar.low + spread, bar.high + spread, bar.open + spread
             later = i > trade.entry_index
             buy = trade.side == "buy"
-            gap_stop = open_ <= trade.stop if buy else open_ >= trade.stop  # the fill bar too: exit side opens past it
+            gap_stop = later and (open_ <= trade.stop if buy else open_ >= trade.stop)
             if gap_stop or (lo <= trade.stop if buy else hi >= trade.stop):
                 _close(trade, i, open_ if gap_stop else trade.stop, "stop", costs)
             elif trade.target is not None and (hi >= trade.target if buy else lo <= trade.target):
@@ -298,6 +310,8 @@ def simulate(idea: Idea, p: dict[str, Any], bars: Sequence[Bar], costs: Costs) -
             pending = idea.entry(i, History(bars, i, last_entry, last_exit, spread), state, p)
     if trade is not None:
         last = bars[-1]
+        if weights is not None:  # rollovers during the last bar, up to its close where the trade is marked
+            trade.swap_days += costs.rollovers_between(last.time, last.close_time)
         _close(trade, len(bars) - 1, last.close if trade.side == "buy" else last.close + spread, "end", costs)
     return trades
 

@@ -231,12 +231,19 @@ class Once(Idea):
         return Entry(self.side, **self.kw) if i == self.at else None
 
 
-def test_fill_bar_opening_past_the_stop_exits_at_that_open():
+def test_a_stop_already_past_the_exit_quote_is_refused_like_a_broker_would():
     bars = [Bar(T0 + k * H1, 100, 101, 99, 100) for k in range(3)]  # bid 99-101, ask = bid + 10
-    buy = simulate(Once(0, stop=105.0), {"x": 1}, bars, Costs(spread=10.0))[0]
-    assert (buy.fill, buy.exit_price, buy.reason) == (110.0, 100.0, "stop") and buy.r == pytest.approx(-2.0)
-    sell = simulate(Once(0, side="sell", stop=105.0), {"x": 1}, bars, Costs(spread=10.0))[0]
-    assert (sell.fill, sell.exit_price, sell.reason) == (100.0, 110.0, "stop") and sell.r == pytest.approx(-2.0)
+    assert simulate(Once(0, stop=105.0), {"x": 1}, bars, Costs(spread=10.0)) == []  # buy: stop above the bid
+    assert simulate(Once(0, side="sell", stop=105.0), {"x": 1}, bars, Costs(spread=10.0)) == []  # sell: below the ask
+    tight = simulate(Once(0, stop=99.0), {"x": 1}, bars, Costs(spread=10.0))[0]  # just under the bid: accepted
+    assert (tight.fill, tight.exit_price, tight.reason) == (110.0, 99.0, "stop")
+
+
+def test_a_trade_held_to_the_end_pays_a_rollover_during_the_last_bar():
+    bars = [Bar(T0 + timedelta(hours=h), 1000, 1005, 995, 1000) for h in (-3, -2, -1)]  # last bar closes at midnight
+    costs = Costs(spread=0.0, swap_mode="points", swap_long=-500, point=0.01, swap_days=(1,) * 7, rollover="utc_midnight")
+    t = simulate(Once(0, stop=900.0), {"x": 1}, bars, costs)[0]
+    assert (t.reason, t.swap_days) == ("end", 1.0)
 
 
 def test_time_exit_pays_a_rollover_inside_a_data_gap():
@@ -316,6 +323,23 @@ def test_an_opened_lockbox_without_a_result_is_spent(tmp_path, capsys):
         f"{b.time.isoformat()},{b.open},{b.high},{b.low},{b.close},{b.volume},{b.buy_volume}\n" for b in flow_bars(400)))
     cli.cmd_lab(cfg, str(csv), ["absorption_shift"], None, False, False)
     assert "absorption_shift: เปิดช่วงล็อกไปแล้วแต่ไม่มีผลบันทึก" in capsys.readouterr().out
+
+
+def test_the_ledger_opens_a_lockbox_once_and_judges_once():
+    ledger = Ledger.open(None)
+    ledger.register("x", "h", {}, {}, {})
+    assert ledger.record_holdout("x", "h", {}) == 1
+    with pytest.raises(ValueError, match="เปิดซ้ำไม่ได้"):
+        ledger.record_holdout("x", "h", {})  # a second opening of the same attempt
+    assert "เปิดช่วงล็อกไปแล้ว" in ledger.spent("x", "h")
+    ledger.record_result("x", "h", {"passed": False, "failed_gate": 5})
+    with pytest.raises(ValueError, match="เปิดซ้ำไม่ได้"):
+        ledger.record_holdout("x", "h", {})  # nor after the verdict
+    with pytest.raises(ValueError, match="บันทึกซ้ำไม่ได้"):
+        ledger.record_result("x", "h", {"passed": True, "failed_gate": None})
+    assert [r["type"] for r in ledger.rows] == ["attempt", "holdout", "result"]
+    assert "มีผลในสมุดแล้ว" in ledger.spent("x", "h")
+    assert ledger.record_holdout("x", "h2", {}) == 2  # an edited idea is a new attempt with its own lockbox opening
 
 
 # --- the idea's rule -----------------------------------------------------------------
