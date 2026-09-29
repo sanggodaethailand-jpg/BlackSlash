@@ -156,7 +156,7 @@ def test_months_and_timestamps():
     us = kline_zip("2025-01", [(t, (1, 2, 0.5, 1.5, 10, 4))], micro=True, header=True)
     for blob in (ms, us):
         text = zipfile.ZipFile(io.BytesIO(blob)).read("BTCUSDT-1h-2025-01.csv").decode()
-        assert parse_klines(text) == [(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)]
+        assert parse_klines(text) == ([(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)], [])
 
 
 def test_download_checks_every_file_and_writes_loadable_flow_bars(tmp_path):
@@ -192,8 +192,9 @@ JAN = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp())
 @pytest.mark.parametrize(
     "line, problem",
     [
-        (kline_line(JAN * 10**6, JAN * 10**6 + 3_599_999), "1 ชั่วโมงเต็ม"),  # microsecond open, 3.6-second bar
-        (kline_line(JAN * 1000 + 60_000, JAN * 1000 + 3_659_999), "1 ชั่วโมงเต็ม"),  # not on the hour
+        (kline_line(JAN * 1000 + 60_000, JAN * 1000 + 3_659_999), "ภายใน 1 ชั่วโมงเดียว"),  # not on the hour
+        (kline_line(JAN * 1000, JAN * 1000 + 3_600_001), "ภายใน 1 ชั่วโมงเดียว"),  # longer than the hour
+        (kline_line(JAN * 10**6, JAN * 1000 + 3_599_999), "ภายใน 1 ชั่วโมงเดียว"),  # microsecond open, millisecond close
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, o=3), "ราคาไม่สอดคล้อง"),  # open above the high
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, lo=0), "ราคาไม่สอดคล้อง"),
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, buy=11), "volume ผิด"),  # more market buys than volume
@@ -203,6 +204,48 @@ JAN = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp())
 def test_parser_refuses_malformed_bars(line, problem):
     with pytest.raises(DownloadError, match=problem):
         parse_klines(line + "\n")
+
+
+def test_a_bar_cut_short_by_an_exchange_halt_is_left_out_and_listed(tmp_path):
+    """The real 2018-02-08 00:00 bar closed at 00:28:14.788 when Binance stopped for maintenance."""
+    halt = kline_line(1518048000000, 1518049694788) + "\n"
+    rows, partial = parse_klines(kline_line(1518044400000, 1518047999999) + "\n" + halt)
+    assert [r[0].hour for r in rows] == [23] and len(partial) == 1
+    assert partial[0][0] == datetime(2018, 2, 8, tzinfo=UTC) and partial[0][1] == pytest.approx(28.25, abs=0.01)
+    blob = zip_text("2018-02", kline_line(1518044400000, 1518047999999) + "\n" + halt)
+    said = []
+    march = kline_zip("2018-03", [(datetime(2018, 3, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 4))])
+    fetch = fake_binance({"2018-02": blob, "2018-03": march})
+    assert download("BTCUSDT", "2018-02", "2018-03", tmp_path / "b.csv", fetch, said.append) == 2  # 7 Feb 23:00 + 1 Mar
+    assert "ตัดแท่งที่ Binance ปิดกลางชั่วโมงออก 1 แท่ง" in said[0]
+    assert any("2018-02-08 00:00 UTC ซื้อขายได้แค่ 28.2 นาที" in line for line in said)
+
+
+def zip_text(month, text):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(f"BTCUSDT-1h-{month}.csv", text)
+    return buf.getvalue()
+
+
+def test_many_short_bars_in_a_month_mean_a_broken_file():
+    lines = [kline_line(JAN * 10**6 + h * 3600 * 10**6, JAN * 10**6 + h * 3600 * 10**6 + 3_599_999) for h in range(5)]
+    # microsecond opens with millisecond-sized spans: five 3.6-second bars
+    fetch = fake_binance({"2025-01": zip_text("2025-01", "\n".join(lines) + "\n")})
+    with pytest.raises(DownloadError, match="หน่วยเวลา"):
+        download("BTCUSDT", "2025-01", "2025-01", "unused.csv", fetch, lambda _m: None)
+
+
+def test_every_month_is_checked_before_giving_up(tmp_path):
+    good = [(datetime(2025, 1, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 4))]
+    bad = [(datetime(2025, 2, 1, tzinfo=UTC), (3, 2, 0.5, 1.5, 10, 4))]  # open above the high
+    worse = [(datetime(2025, 3, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 11))]  # more buys than volume
+    fetch = fake_binance({"2025-01": kline_zip("2025-01", good), "2025-02": kline_zip("2025-02", bad),
+                          "2025-03": kline_zip("2025-03", worse)})
+    with pytest.raises(DownloadError, match="พบปัญหา 2 เดือน") as err:
+        download("BTCUSDT", "2025-01", "2025-03", tmp_path / "b.csv", fetch, lambda _m: None)
+    assert "2025-02" in str(err.value) and "2025-03" in str(err.value)
+    assert not (tmp_path / "b.csv").exists()
 
 
 def test_download_refuses_bars_of_another_month_or_twice(tmp_path):

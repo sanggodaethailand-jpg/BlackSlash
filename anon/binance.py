@@ -48,12 +48,19 @@ def _unit(stamp: int) -> int:
     return 1_000_000 if stamp >= 10**14 else 1000  # spot files use microseconds from 2025
 
 
-def parse_klines(text: str) -> list[tuple[datetime, float, float, float, float, float, float]]:
-    """Rows of (open time UTC, open, high, low, close, volume, taker buy volume); a header line,
-    if the file has one, is skipped. Every row must be one whole hour starting on the hour
-    (close time in the same unit as the open time), with low <= open/close <= high, prices
-    above 0, 0 <= buy volume <= volume, and no hour twice."""
-    rows, seen = [], set()
+PARTIAL_LIMIT = 3  # bars cut short by an exchange halt, per month, before the file is treated as broken
+
+
+def parse_klines(text: str) -> tuple[list[tuple], list[tuple[datetime, float]]]:
+    """Whole-hour rows of (open time UTC, open, high, low, close, volume, taker buy volume), and
+    the bars Binance cut short when it halted trading mid-hour (open time, minutes traded).
+
+    A header line, if the file has one, is skipped. Every row must start on the hour, close
+    within that hour in the same time unit as its open, have low <= open/close <= high, prices
+    above 0, 0 <= buy volume <= volume, and no hour twice. A bar that closes before the hour
+    is over (Binance maintenance, e.g. 2018-02-08 00:28) is left out and listed: the lab
+    treats every row as a full hour, so it becomes a gap like any other missing hour."""
+    rows, partial, seen = [], [], set()
     for row in csv.reader(io.StringIO(text)):
         if not row or not row[0].strip().isdigit():
             continue
@@ -64,8 +71,8 @@ def parse_klines(text: str) -> list[tuple[datetime, float, float, float, float, 
         o, h, lo, c, vol = (float(x) for x in row[1:6])
         buy = float(row[9])
         problem = None
-        if start % 3600 or not 3599 < span <= 3600:
-            problem = f"ไม่ใช่แท่ง 1 ชั่วโมงเต็ม (เปิด {row[0]} ปิด {row[6]})"
+        if start % 3600 or _unit(closed) != unit or not 0 < span <= 3600:
+            problem = f"ไม่ใช่แท่งภายใน 1 ชั่วโมงเดียว (เปิด {row[0]} ปิด {row[6]})"
         elif not (0 < lo <= min(o, c) and max(o, c) <= h):
             problem = f"ราคาไม่สอดคล้อง O {o} H {h} L {lo} C {c}"
         elif vol < 0 or buy < 0 or buy > vol + 1e-9:
@@ -75,8 +82,11 @@ def parse_klines(text: str) -> list[tuple[datetime, float, float, float, float, 
         if problem:
             raise DownloadError(f"แท่งผิดรูป {t:%Y-%m-%d %H:%M} UTC: {problem}")
         seen.add(t)
-        rows.append((t, o, h, lo, c, vol, buy))
-    return rows
+        if span <= 3599:
+            partial.append((t, span / 60))
+        else:
+            rows.append((t, o, h, lo, c, vol, buy))
+    return rows, partial
 
 
 def fetch(url: str, timeout: float = 60.0, attempts: int = 4) -> bytes:
@@ -96,7 +106,7 @@ def fetch(url: str, timeout: float = 60.0, attempts: int = 4) -> bytes:
     raise DownloadError(url)
 
 
-def month_rows(symbol: str, month: str, fetch_fn: Callable[[str], bytes] = fetch) -> list[tuple]:
+def month_rows(symbol: str, month: str, fetch_fn: Callable[[str], bytes] = fetch) -> tuple[list[tuple], list[tuple]]:
     url = kline_url(symbol, month)
     blob = fetch_fn(url)
     expected = fetch_fn(url + ".CHECKSUM").decode("utf-8").split()[0].lower()
@@ -107,11 +117,16 @@ def month_rows(symbol: str, month: str, fetch_fn: Callable[[str], bytes] = fetch
         names = [n for n in archive.namelist() if n.endswith(".csv")]
         if len(names) != 1:
             raise DownloadError(f"{url}: expected one CSV inside, found {names}")
-        rows = parse_klines(archive.read(names[0]).decode("utf-8"))
-    outside = [r[0] for r in rows if r[0].strftime("%Y-%m") != month]
+        rows, partial = parse_klines(archive.read(names[0]).decode("utf-8"))
+    outside = [r[0] for r in rows + partial if r[0].strftime("%Y-%m") != month]
     if outside:
         raise DownloadError(f"ไฟล์เดือน {month} มีแท่งของเดือนอื่น ({outside[0]:%Y-%m-%d %H:%M} UTC)")
-    return rows
+    if len(partial) > PARTIAL_LIMIT:
+        raise DownloadError(
+            f"ไฟล์เดือน {month} มีแท่งไม่เต็มชั่วโมง {len(partial)} แท่ง (เกิน {PARTIAL_LIMIT}): "
+            "มากเกินกว่าจะเป็นการปิดระบบของ Binance น่าจะอ่านหน่วยเวลาผิด"
+        )
+    return rows, partial
 
 
 def download(
@@ -120,13 +135,24 @@ def download(
 ) -> int:
     """Write every hour from ``start`` to ``end`` (months, inclusive); returns the bar count."""
     bars: dict[datetime, tuple] = {}
-    for month in months(start, end):
-        rows = month_rows(symbol, month, fetch_fn)
-        for row in rows:
-            if row[0] in bars:
-                raise DownloadError(f"ชั่วโมงซ้ำข้ามไฟล์: {row[0]:%Y-%m-%d %H:%M} UTC")
-            bars[row[0]] = row
-        output_fn(f"{symbol} {month}: {len(rows)} แท่ง (SHA-256 ตรง)")
+    cut_short: list[tuple[datetime, float]] = []
+    problems: list[str] = []
+    for month in months(start, end):  # every month is checked, so one run shows every problem
+        try:
+            rows, partial = month_rows(symbol, month, fetch_fn)
+            twice = [r[0] for r in rows if r[0] in bars]
+            if twice:
+                raise DownloadError(f"ชั่วโมงซ้ำข้ามไฟล์: {twice[0]:%Y-%m-%d %H:%M} UTC")
+        except DownloadError as exc:
+            problems.append(f"{month}: {exc}")
+            output_fn(f"{symbol} {month}: ❌ {exc}")
+            continue
+        bars.update((row[0], row) for row in rows)
+        cut_short += partial
+        note = f" · ตัดแท่งที่ Binance ปิดกลางชั่วโมงออก {len(partial)} แท่ง" if partial else ""
+        output_fn(f"{symbol} {month}: {len(rows)} แท่ง (SHA-256 ตรง){note}")
+    if problems:
+        raise DownloadError(f"พบปัญหา {len(problems)} เดือน จึงไม่เขียนไฟล์: " + " | ".join(problems[:10]))
     ordered = [bars[t] for t in sorted(bars)]
     if not ordered:
         raise DownloadError("ไม่ได้แท่งเลยสักแท่ง")
@@ -138,6 +164,8 @@ def download(
         writer.writerow(["time", "open", "high", "low", "close", "volume", "buy_volume"])
         for t, o, h, lo, c, vol, buy in ordered:
             writer.writerow([t.isoformat(), o, h, lo, c, vol, buy])
+    for t, minutes in cut_short:
+        output_fn(f"  ตัดออก: {t:%Y-%m-%d %H:%M} UTC ซื้อขายได้แค่ {minutes:.1f} นาทีก่อน Binance ปิดระบบ")
     output_fn(
         f"บันทึก {len(ordered):,} แท่ง {ordered[0][0]:%Y-%m-%d} → {ordered[-1][0]:%Y-%m-%d %H:%M} UTC ที่ {path} "
         f"(มีช่วงที่ขาดหาย {gaps} จุด เช่นตอน Binance ปิดปรับปรุงระบบ)"
