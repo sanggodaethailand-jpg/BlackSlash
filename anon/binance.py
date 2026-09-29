@@ -50,28 +50,44 @@ def _unit(stamp: int) -> int:
 
 
 PARTIAL_LIMIT = 3  # bars cut short by an exchange halt, per month, before the file is treated as broken
+KLINE_HEADER = (  # the only header line accepted, and only as the first line of a file
+    "open_time", "open", "high", "low", "close", "volume", "close_time",
+    "quote_volume", "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore",
+)
 
 
 def parse_klines(text: str) -> tuple[list[tuple], list[tuple[datetime, float]]]:
     """Whole-hour rows of (open time UTC, open, high, low, close, volume, taker buy volume), and
     the bars Binance cut short when it halted trading mid-hour (open time, minutes traded).
 
-    A header line, if the file has one, is skipped. Every row must start on the hour, close
-    within that hour in the same time unit as its open, have finite numbers, low <= open/close
-    <= high, prices above 0, 0 <= buy volume <= volume, and no hour twice. A bar that closes
-    before the hour is over (Binance maintenance, e.g. 2018-02-08 00:28) is left out and listed:
-    the lab treats every row as a full hour, so it becomes a gap like any other missing hour.
-    ``download`` then accepts it only if the next hour is missing too (trading really stopped)."""
+    Blank lines are skipped, and so is Binance's header line if it is the first line. Every
+    other line is a bar or the file is refused: 12 fields that read as numbers, start on the
+    hour, close within that hour in the same time unit as its open, finite numbers,
+    low <= open/close <= high, prices above 0, 0 <= buy volume <= volume, and no hour twice.
+    A bar that closes before the hour is over (Binance maintenance, e.g. 2018-02-08 00:28) is
+    left out and listed: the lab treats every row as a full hour, so it becomes a gap like any
+    other missing hour. ``download`` then accepts it only if the next hour is missing too
+    (trading really stopped)."""
     rows, partial, seen = [], [], set()
-    for row in csv.reader(io.StringIO(text)):
-        if not row or not row[0].strip().isdigit():
+    reader = csv.reader(io.StringIO(text))
+    for row in reader:
+        if not any(field.strip() for field in row):
             continue
-        opened, closed = int(row[0]), int(row[6])
-        unit = _unit(opened)
-        start, span = opened / unit, (closed - opened) / unit
-        t = datetime.fromtimestamp(start, tz=UTC)
-        o, h, lo, c, vol = (float(x) for x in row[1:6])
-        buy = float(row[9])
+        if reader.line_num == 1 and tuple(f.strip().lower() for f in row) == KLINE_HEADER:
+            continue
+        where = f"บรรทัด {reader.line_num}"
+        if len(row) != len(KLINE_HEADER):
+            raise DownloadError(f"{where}: มี {len(row)} ช่อง ไม่ใช่ {len(KLINE_HEADER)} ช่องแบบ kline ของ Binance "
+                                f"({','.join(row)[:60]})")
+        try:
+            opened, closed = int(row[0]), int(row[6])
+            unit = _unit(opened)
+            start, span = opened / unit, (closed - opened) / unit
+            t = datetime.fromtimestamp(start, tz=UTC)
+            o, h, lo, c, vol = (float(x) for x in row[1:6])
+            buy = float(row[9])
+        except (ValueError, OverflowError, OSError) as exc:
+            raise DownloadError(f"{where}: อ่านเวลาหรือตัวเลขไม่ได้ ({','.join(row)[:60]})") from exc
         problem = None
         if not all(math.isfinite(x) for x in (o, h, lo, c, vol, buy)):
             problem = f"ตัวเลขไม่ใช่ค่าจริง (NaN/Infinity): O {o} H {h} L {lo} C {c} volume {vol} buy {buy}"
@@ -121,7 +137,10 @@ def month_rows(symbol: str, month: str, fetch_fn: Callable[[str], bytes] = fetch
         names = [n for n in archive.namelist() if n.endswith(".csv")]
         if len(names) != 1:
             raise DownloadError(f"{url}: expected one CSV inside, found {names}")
-        rows, partial = parse_klines(archive.read(names[0]).decode("utf-8"))
+        try:
+            rows, partial = parse_klines(archive.read(names[0]).decode("utf-8-sig"))
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise DownloadError(f"ไฟล์เดือน {month} อ่านเป็น CSV ไม่ได้: {exc}") from exc
     outside = [r[0] for r in rows + partial if r[0].strftime("%Y-%m") != month]
     if outside:
         raise DownloadError(f"ไฟล์เดือน {month} มีแท่งของเดือนอื่น ({outside[0]:%Y-%m-%d %H:%M} UTC)")

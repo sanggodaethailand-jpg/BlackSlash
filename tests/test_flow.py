@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from anon import cli
-from anon.binance import DownloadError, download, kline_url, months, parse_klines
+from anon.binance import KLINE_HEADER, DownloadError, download, kline_url, months, parse_klines
 from anon.config import Config
 from anon.data import load_bars
 from anon.lab.core import Costs, Entry, History, Idea, idea_hash, simulate
@@ -120,7 +120,7 @@ def test_signflip_flow_null_holds_at_the_extremes(shares, expected):
 # --- anon binance --------------------------------------------------------------------
 
 def kline_zip(month, rows, micro=False, header=False):
-    lines = ["open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,x,ignore"] if header else []
+    lines = [",".join(KLINE_HEADER)] if header else []
     unit = 1_000_000 if micro else 1000
     for t, (o, h, lo, c, v, buy) in rows:
         stamp = int(t.timestamp() * unit)
@@ -208,6 +208,45 @@ JAN = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp())
 def test_parser_refuses_malformed_bars(line, problem):
     with pytest.raises(DownloadError, match=problem):
         parse_klines(line + "\n")
+
+
+GOOD = kline_line(JAN * 1000, JAN * 1000 + 3_599_999)
+NEXT = kline_line(JAN * 1000 + 3_600_000, JAN * 1000 + 7_199_999)
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        (f"{GOOD}\ngarbage\n{NEXT}\n", "บรรทัด 2: มี 1 ช่อง"),  # a stray line is never taken for a header
+        (f"{GOOD}\n1735693200O00,{NEXT.split(',', 1)[1]}\n", "บรรทัด 2: อ่านเวลาหรือตัวเลขไม่ได้"),  # broken time
+        (f"{GOOD}\n{','.join(KLINE_HEADER)}\n{NEXT}\n", "บรรทัด 2: อ่านเวลาหรือตัวเลขไม่ได้"),  # header mid-file
+        (f"time,open,high,low,close,volume,a,b,c,d,e,f\n{GOOD}\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),  # unknown header
+        (f"{GOOD}\n{NEXT},0\n", "บรรทัด 2: มี 13 ช่อง"),
+        (f"{GOOD}\n{NEXT.rsplit(',', 3)[0]}\n", "บรรทัด 2: มี 9 ช่อง"),  # cut short, no buy volume
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, o="abc") + "\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),
+        (kline_line(10**20, 10**20 + 3_599_999) + "\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),  # past year 9999
+    ],
+)
+def test_parser_refuses_every_line_it_cannot_read(text, problem):
+    with pytest.raises(DownloadError, match=problem):
+        parse_klines(text)
+
+
+def test_parser_skips_only_blank_lines_and_binance_header_on_the_first_line(tmp_path):
+    t = datetime(2025, 1, 1, tzinfo=UTC)
+    expected = ([(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0), (t + H1, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)], [])
+    assert parse_klines(f"{GOOD}\n\n{NEXT}\n\n") == expected
+    assert parse_klines(f"{','.join(KLINE_HEADER).upper()}\r\n{GOOD}\r\n{NEXT}\r\n") == expected
+    fetch = fake_binance({"2025-01": zip_text("2025-01", f"﻿{','.join(KLINE_HEADER)}\n{GOOD}\n{NEXT}\n")})
+    assert download("BTCUSDT", "2025-01", "2025-01", tmp_path / "b.csv", fetch, lambda _m: None) == 2  # BOM ignored
+
+
+def test_a_file_that_is_not_text_is_reported_with_the_other_months(tmp_path):
+    fetch = fake_binance({"2025-01": zip_text("2025-01", b"\xff\xfe" + GOOD.encode()),
+                          "2025-02": zip_text("2025-02", "garbage\n")})
+    with pytest.raises(DownloadError, match="พบปัญหา 2 จุด") as err:
+        download("BTCUSDT", "2025-01", "2025-02", tmp_path / "b.csv", fetch, lambda _m: None)
+    assert "2025-01: ไฟล์เดือน 2025-01 อ่านเป็น CSV ไม่ได้" in str(err.value) and "2025-02: บรรทัด 1" in str(err.value)
 
 
 def test_a_bar_cut_short_by_an_exchange_halt_is_left_out_and_listed(tmp_path):
