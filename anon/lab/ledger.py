@@ -62,6 +62,16 @@ class Ledger:
     def record_result(self, idea: str, digest: str, result: dict[str, Any]) -> None:
         self._append({"type": "result", "idea": idea, "hash": digest, **result})
 
+    def spent(self, idea: str, digest: str) -> str | None:
+        """Why this exact attempt may never run again (on any data), or None."""
+        res = self.results().get((idea, digest))
+        if res is not None:
+            verdict = "✅ ผ่าน" if res.get("passed") else f"❌ ตกด่าน {res.get('failed_gate')}"
+            return f"มีผลในสมุดแล้ว ({verdict}) → ไม่รันซ้ำ ทั้งกับข้อมูลเดิมและข้อมูลชุดอื่น"
+        if any(r["type"] == "holdout" and r["idea"] == idea and r.get("hash") == digest for r in self.rows):
+            return "เปิดช่วงล็อกไปแล้วแต่ไม่มีผลบันทึก (โปรแกรมหยุดกลางทาง) → นับว่าใช้ไปแล้ว ต้องเขียนเป็นไอเดียใหม่"
+        return None
+
     def results(self) -> dict[tuple[str, str], dict[str, Any]]:
         out: dict[tuple[str, str], dict[str, Any]] = {}
         for row in self.rows:

@@ -181,12 +181,11 @@ def cmd_lab(
                   tuple(lab.swap_days), lab.rollover, lab.commission)
     if smoke:
         print("ทดลองเครื่อง: รันแม่แบบ ไม่บันทึกลงสมุด ผลนี้ไม่ใช่หลักฐานอะไร\n")
-    done, flow = ledger.results(), has_flow(bars)
+    flow = has_flow(bars)
     for name, idea in list(ideas.items()):
-        res = done.get((idea.name, idea_hash(idea)))
-        if res is not None:  # judged once; running it on other data would be an unregistered retest
-            verdict = "✅ ผ่าน" if res["passed"] else f"❌ ตกด่าน {res['failed_gate']}"
-            print(f"{name}: มีผลในสมุดแล้ว ({verdict}) → ไม่รันซ้ำ ทั้งกับข้อมูลเดิมและข้อมูลชุดอื่น")
+        why = ledger.spent(idea.name, idea_hash(idea))
+        if why:  # judged once; running it on other data would be an unregistered retest
+            print(f"{name}: {why}")
             del ideas[name]
         elif idea.needs_flow and not flow:
             print(f"{name}: ต้องใช้ข้อมูลที่มี volume/buy_volume (anon binance) → ไม่ลงทะเบียน ไม่รัน")

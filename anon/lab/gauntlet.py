@@ -26,7 +26,7 @@ from anon.lab.ledger import Ledger, threshold
 from anon.lab.nulls import KINDS, fake_history
 from anon.models import Bar
 
-LAB_VERSION = 2
+LAB_VERSION = 3  # 3: fill-bar gap stops, swap on time exits, max_wait, flow data
 MIN_DEV_TRADES = 30
 MIN_HOLDOUT_TRADES = 10
 PLATEAU_SHARE = 2 / 3
@@ -221,8 +221,12 @@ def run_gauntlet(
     validate_idea(idea)
     if idea.needs_flow and not has_flow(bars):
         raise ValueError(f"{idea.name} needs volume/buy_volume columns (anon binance); this data has none")
+    digest = idea_hash(idea)
+    why = ledger.spent(idea.name, digest)
+    if why:
+        raise ValueError(f"{idea.name} ({digest}): {why}")
     cut, data = split_data(bars, ledger, source)
-    dev_bars, digest = bars[:cut], idea_hash(idea)
+    dev_bars = bars[:cut]
     # gate 1: the attempt is on record before anything is measured
     k = ledger.register(idea.name, digest, idea.primary, idea.grid, data)
     rep = Report(idea.name, idea.family, idea.hypothesis, digest, k, threshold(k), data, costs, primary=dict(idea.primary))

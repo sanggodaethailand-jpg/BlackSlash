@@ -44,21 +44,38 @@ def kline_url(symbol: str, month: str) -> str:
     return f"{BASE}/{symbol}/{INTERVAL}/{symbol}-{INTERVAL}-{month}.zip"
 
 
-def _epoch_seconds(value: str) -> float:
-    stamp = int(value)
-    return stamp / 1_000_000 if stamp >= 10**14 else stamp / 1000  # spot files use microseconds from 2025
+def _unit(stamp: int) -> int:
+    return 1_000_000 if stamp >= 10**14 else 1000  # spot files use microseconds from 2025
 
 
 def parse_klines(text: str) -> list[tuple[datetime, float, float, float, float, float, float]]:
     """Rows of (open time UTC, open, high, low, close, volume, taker buy volume); a header line,
-    if the file has one, is skipped."""
-    rows = []
+    if the file has one, is skipped. Every row must be one whole hour starting on the hour
+    (close time in the same unit as the open time), with low <= open/close <= high, prices
+    above 0, 0 <= buy volume <= volume, and no hour twice."""
+    rows, seen = [], set()
     for row in csv.reader(io.StringIO(text)):
         if not row or not row[0].strip().isdigit():
             continue
-        t = datetime.fromtimestamp(_epoch_seconds(row[0]), tz=UTC)
+        opened, closed = int(row[0]), int(row[6])
+        unit = _unit(opened)
+        start, span = opened / unit, (closed - opened) / unit
+        t = datetime.fromtimestamp(start, tz=UTC)
         o, h, lo, c, vol = (float(x) for x in row[1:6])
-        rows.append((t, o, h, lo, c, vol, float(row[9])))
+        buy = float(row[9])
+        problem = None
+        if start % 3600 or not 3599 < span <= 3600:
+            problem = f"ไม่ใช่แท่ง 1 ชั่วโมงเต็ม (เปิด {row[0]} ปิด {row[6]})"
+        elif not (0 < lo <= min(o, c) and max(o, c) <= h):
+            problem = f"ราคาไม่สอดคล้อง O {o} H {h} L {lo} C {c}"
+        elif vol < 0 or buy < 0 or buy > vol + 1e-9:
+            problem = f"volume ผิด (volume {vol}, ซื้อด้วยคำสั่งตลาด {buy})"
+        elif t in seen:
+            problem = "ชั่วโมงซ้ำ"
+        if problem:
+            raise DownloadError(f"แท่งผิดรูป {t:%Y-%m-%d %H:%M} UTC: {problem}")
+        seen.add(t)
+        rows.append((t, o, h, lo, c, vol, buy))
     return rows
 
 
@@ -90,7 +107,11 @@ def month_rows(symbol: str, month: str, fetch_fn: Callable[[str], bytes] = fetch
         names = [n for n in archive.namelist() if n.endswith(".csv")]
         if len(names) != 1:
             raise DownloadError(f"{url}: expected one CSV inside, found {names}")
-        return parse_klines(archive.read(names[0]).decode("utf-8"))
+        rows = parse_klines(archive.read(names[0]).decode("utf-8"))
+    outside = [r[0] for r in rows if r[0].strftime("%Y-%m") != month]
+    if outside:
+        raise DownloadError(f"ไฟล์เดือน {month} มีแท่งของเดือนอื่น ({outside[0]:%Y-%m-%d %H:%M} UTC)")
+    return rows
 
 
 def download(
@@ -102,6 +123,8 @@ def download(
     for month in months(start, end):
         rows = month_rows(symbol, month, fetch_fn)
         for row in rows:
+            if row[0] in bars:
+                raise DownloadError(f"ชั่วโมงซ้ำข้ามไฟล์: {row[0]:%Y-%m-%d %H:%M} UTC")
             bars[row[0]] = row
         output_fn(f"{symbol} {month}: {len(rows)} แท่ง (SHA-256 ตรง)")
     ordered = [bars[t] for t in sorted(bars)]

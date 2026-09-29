@@ -12,11 +12,15 @@ red-team checklist are in research/delta_plan.md. At the close of bar ``s`` (bar
   then sold with z_s <= -SHIFT_Z and a lower close)
 - stop just beyond the two bars' extreme (BUFFER of the average bar range), target at
   ``target_r`` R, out after MAX_HOLD bars at the latest
+- missing hours: a and s must be consecutive hours and the fill must be the very next hour
+  (``max_wait=0``), so a signal never outlives a gap in the data; the baselines count bars,
+  and the rare exchange outages simply shorten them in time
 """
 
 from __future__ import annotations
 
 from anon.lab.core import Entry, Idea
+from anon.models import H1
 
 WINDOW = 168  # one week of H1 bars: the normal share of market buys and the normal volume
 RANGE = 48  # two days: where the absorption bar sits in the recent range
@@ -85,6 +89,8 @@ class AbsorptionShift(Idea):
         if a < max(WINDOW, RANGE) or mean[a] is None or rng[s] is None:
             return None
         bar_a, bar_s = bars[a], bars[s]
+        if bar_s.time - bar_a.time != H1:
+            return None  # an hour or more is missing between the absorption and the shift
         if bar_a.volume <= 0 or bar_s.volume <= 0 or bar_a.volume < vol[a] or bar_a.high <= bar_a.low:
             return None
         z_a = (bar_a.buy_volume / bar_a.volume - mean[a]) / sd[a]
@@ -98,11 +104,11 @@ class AbsorptionShift(Idea):
         if (z_a <= -p["z"] and held >= HELD and (bar_a.low - low) / (high - low) <= DISCOUNT
                 and z_s >= SHIFT_Z and bar_s.close > bar_a.close):
             stop = min(bar_a.low, bar_s.low) - buffer
-            return Entry("buy", stop=stop, target_r=p["target_r"], max_hold=MAX_HOLD)
+            return Entry("buy", stop=stop, target_r=p["target_r"], max_hold=MAX_HOLD, max_wait=0)
         if (z_a >= p["z"] and held <= 1 - HELD and (high - bar_a.high) / (high - low) <= DISCOUNT
                 and z_s <= -SHIFT_Z and bar_s.close < bar_a.close):
             stop = max(bar_a.high, bar_s.high) + buffer
-            return Entry("sell", stop=stop, target_r=p["target_r"], max_hold=MAX_HOLD)
+            return Entry("sell", stop=stop, target_r=p["target_r"], max_hold=MAX_HOLD, max_wait=0)
         return None
 
 

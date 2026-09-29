@@ -5,9 +5,11 @@ Execution model, kept deliberately conservative:
 - bars are bid prices: a buy fills at ask (bid + spread) and exits at bid, a sell the reverse;
 - slippage moves every fill and every exit against the trade;
 - a stop and a target inside the same bar count as the stop;
-- a gap through the stop fills at the open, i.e. worse than the stop;
+- a gap through the stop fills at the open, i.e. worse than the stop, on the fill bar too
+  (a buy filled at the ask whose bid already opens under the stop is out at that bid);
 - swap is charged at the broker's rollover (17:00 New York by default, Friday x3, weekend 0),
-  as a yearly rate on the fill price so it scales with price across the years;
+  as a yearly rate on the fill price so it scales with price across the years; every rollover
+  up to and including the exit time is charged, missing hours included;
 - R is measured from the real fill to the initial stop, so spread is inside every R.
 """
 
@@ -43,6 +45,7 @@ class Entry:
     stop_distance: float | None = None
     target_r: float | None = None  # target at this many R from the fill
     max_gap: float | None = None  # skip when the next open is further than this from the signal close
+    max_wait: float | None = None  # skip when the fill bar opens more than this many hours after the signal bar closed
 
 
 @dataclass
@@ -221,6 +224,8 @@ def _open(e: Entry, i: int, bars: Sequence[Bar], costs: Costs) -> Trade | None:
     bar = bars[i]
     if e.max_gap is not None and abs(bar.open - bars[i - 1].close) > e.max_gap:
         return None
+    if e.max_wait is not None and (bar.time - bars[i - 1].close_time).total_seconds() > e.max_wait * 3600:
+        return None  # hours missing between the signal and the fill: the signal is stale
     buy = e.side == "buy"
     fill = bar.open + costs.spread + costs.slippage if buy else bar.open - costs.slippage
     if e.stop_distance is not None:
@@ -249,6 +254,8 @@ def simulate(idea: Idea, p: dict[str, Any], bars: Sequence[Bar], costs: Costs) -
     last_entry = last_exit = None
     for i, bar in enumerate(bars):
         if trade is not None and exit_next:
+            if weights is not None:
+                trade.swap_days += weights[i]  # rollovers up to this open, a gap in the data included
             _close(trade, i, bar.open if trade.side == "buy" else bar.open + spread, trade.reason or "rule", costs)
             last_exit, trade, exit_next = i, None, False
         if pending is not None:
@@ -265,7 +272,7 @@ def simulate(idea: Idea, p: dict[str, Any], bars: Sequence[Bar], costs: Costs) -
                 lo, hi, open_ = bar.low + spread, bar.high + spread, bar.open + spread
             later = i > trade.entry_index
             buy = trade.side == "buy"
-            gap_stop = later and (open_ <= trade.stop if buy else open_ >= trade.stop)
+            gap_stop = open_ <= trade.stop if buy else open_ >= trade.stop  # the fill bar too: exit side opens past it
             if gap_stop or (lo <= trade.stop if buy else hi >= trade.stop):
                 _close(trade, i, open_ if gap_stop else trade.stop, "stop", costs)
             elif trade.target is not None and (hi >= trade.target if buy else lo <= trade.target):

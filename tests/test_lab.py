@@ -381,8 +381,10 @@ def test_a_planted_edge_walks_through_all_five_gates(tmp_path):
     assert rep.holdout is not None and rep.holdout.expectancy_r > 0 and rep.holdout_opening == 1
     assert rep.stressed.expectancy_r > 0 and messages[-1] == "  signflip: 40/40"
     assert "✅" in format_report(rep) and ledger.results()[("ten_oclock", rep.digest)]["passed"] is True
-    again = run_gauntlet(TenOClock(), planted_edge(), Costs(spread=10.0), ledger, trials=40)
-    assert again.holdout_opening == 2 and "เปิดครั้งที่ 2" in format_report(again)
+    rows = len(ledger.rows)
+    with pytest.raises(ValueError, match="มีผลในสมุดแล้ว"):  # judged once: never rerun, on any data
+        run_gauntlet(TenOClock(), planted_edge(), Costs(spread=10.0), ledger, trials=40)
+    assert len(ledger.rows) == rows
 
 
 def test_concentrated_or_unstable_profits_fail_gate_three():
