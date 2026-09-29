@@ -11,12 +11,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import math
 import time
 import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 BASE = "https://data.binance.vision/data/spot/monthly/klines"
@@ -56,10 +57,11 @@ def parse_klines(text: str) -> tuple[list[tuple], list[tuple[datetime, float]]]:
     the bars Binance cut short when it halted trading mid-hour (open time, minutes traded).
 
     A header line, if the file has one, is skipped. Every row must start on the hour, close
-    within that hour in the same time unit as its open, have low <= open/close <= high, prices
-    above 0, 0 <= buy volume <= volume, and no hour twice. A bar that closes before the hour
-    is over (Binance maintenance, e.g. 2018-02-08 00:28) is left out and listed: the lab
-    treats every row as a full hour, so it becomes a gap like any other missing hour."""
+    within that hour in the same time unit as its open, have finite numbers, low <= open/close
+    <= high, prices above 0, 0 <= buy volume <= volume, and no hour twice. A bar that closes
+    before the hour is over (Binance maintenance, e.g. 2018-02-08 00:28) is left out and listed:
+    the lab treats every row as a full hour, so it becomes a gap like any other missing hour.
+    ``download`` then accepts it only if the next hour is missing too (trading really stopped)."""
     rows, partial, seen = [], [], set()
     for row in csv.reader(io.StringIO(text)):
         if not row or not row[0].strip().isdigit():
@@ -71,7 +73,9 @@ def parse_klines(text: str) -> tuple[list[tuple], list[tuple[datetime, float]]]:
         o, h, lo, c, vol = (float(x) for x in row[1:6])
         buy = float(row[9])
         problem = None
-        if start % 3600 or _unit(closed) != unit or not 0 < span <= 3600:
+        if not all(math.isfinite(x) for x in (o, h, lo, c, vol, buy)):
+            problem = f"ตัวเลขไม่ใช่ค่าจริง (NaN/Infinity): O {o} H {h} L {lo} C {c} volume {vol} buy {buy}"
+        elif start % 3600 or _unit(closed) != unit or not 0 < span <= 3600:
             problem = f"ไม่ใช่แท่งภายใน 1 ชั่วโมงเดียว (เปิด {row[0]} ปิด {row[6]})"
         elif not (0 < lo <= min(o, c) and max(o, c) <= h):
             problem = f"ราคาไม่สอดคล้อง O {o} H {h} L {lo} C {c}"
@@ -151,8 +155,18 @@ def download(
         cut_short += partial
         note = f" · ตัดแท่งที่ Binance ปิดกลางชั่วโมงออก {len(partial)} แท่ง" if partial else ""
         output_fn(f"{symbol} {month}: {len(rows)} แท่ง (SHA-256 ตรง){note}")
+    y, m = (int(x) for x in end.split("-"))
+    range_end = datetime(y + m // 12, m % 12 + 1, 1, tzinfo=UTC)  # first hour after the requested months
+    seen = set(bars) | {t for t, _ in cut_short}
+    for t, minutes in cut_short:  # a real halt: trading stopped, so the next hour has no bar at all
+        after = t + timedelta(hours=1)
+        if after >= range_end:
+            problems.append(f"{t:%Y-%m-%d %H:%M} UTC: แท่งสุดท้ายของช่วงปิดก่อนครบชั่วโมง ยืนยันไม่ได้ว่าเป็นการปิดระบบ")
+        elif after in seen:
+            problems.append(f"{t:%Y-%m-%d %H:%M} UTC: ปิดก่อนครบชั่วโมง ({minutes:.1f} นาที) แต่ชั่วโมงถัดไปยังมีการซื้อขาย "
+                            "จึงไม่ใช่การปิดระบบ: เวลาปิดน่าจะเสีย")
     if problems:
-        raise DownloadError(f"พบปัญหา {len(problems)} เดือน จึงไม่เขียนไฟล์: " + " | ".join(problems[:10]))
+        raise DownloadError(f"พบปัญหา {len(problems)} จุด จึงไม่เขียนไฟล์: " + " | ".join(problems[:10]))
     ordered = [bars[t] for t in sorted(bars)]
     if not ordered:
         raise DownloadError("ไม่ได้แท่งเลยสักแท่ง")
