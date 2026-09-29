@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from anon import cli
-from anon.binance import DownloadError, download, kline_url, months, parse_klines
+from anon.binance import KLINE_HEADER, DownloadError, download, kline_url, months, parse_klines
 from anon.config import Config
 from anon.data import load_bars
 from anon.lab.core import Costs, Entry, History, Idea, idea_hash, simulate
@@ -120,7 +120,7 @@ def test_signflip_flow_null_holds_at_the_extremes(shares, expected):
 # --- anon binance --------------------------------------------------------------------
 
 def kline_zip(month, rows, micro=False, header=False):
-    lines = ["open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,x,ignore"] if header else []
+    lines = [",".join(KLINE_HEADER)] if header else []
     unit = 1_000_000 if micro else 1000
     for t, (o, h, lo, c, v, buy) in rows:
         stamp = int(t.timestamp() * unit)
@@ -156,7 +156,7 @@ def test_months_and_timestamps():
     us = kline_zip("2025-01", [(t, (1, 2, 0.5, 1.5, 10, 4))], micro=True, header=True)
     for blob in (ms, us):
         text = zipfile.ZipFile(io.BytesIO(blob)).read("BTCUSDT-1h-2025-01.csv").decode()
-        assert parse_klines(text) == [(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)]
+        assert parse_klines(text) == ([(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)], [])
 
 
 def test_download_checks_every_file_and_writes_loadable_flow_bars(tmp_path):
@@ -192,17 +192,116 @@ JAN = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp())
 @pytest.mark.parametrize(
     "line, problem",
     [
-        (kline_line(JAN * 10**6, JAN * 10**6 + 3_599_999), "1 ชั่วโมงเต็ม"),  # microsecond open, 3.6-second bar
-        (kline_line(JAN * 1000 + 60_000, JAN * 1000 + 3_659_999), "1 ชั่วโมงเต็ม"),  # not on the hour
+        (kline_line(JAN * 1000 + 60_000, JAN * 1000 + 3_659_999), "ภายใน 1 ชั่วโมงเดียว"),  # not on the hour
+        (kline_line(JAN * 1000, JAN * 1000 + 3_600_001), "ภายใน 1 ชั่วโมงเดียว"),  # longer than the hour
+        (kline_line(JAN * 10**6, JAN * 1000 + 3_599_999), "ภายใน 1 ชั่วโมงเดียว"),  # microsecond open, millisecond close
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, o=3), "ราคาไม่สอดคล้อง"),  # open above the high
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, lo=0), "ราคาไม่สอดคล้อง"),
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, buy=11), "volume ผิด"),  # more market buys than volume
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, v="NaN"), "NaN/Infinity"),
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, v="Infinity", buy="Infinity"), "NaN/Infinity"),
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, h="Infinity"), "NaN/Infinity"),
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, buy="nan"), "NaN/Infinity"),
         (kline_line(JAN * 1000, JAN * 1000 + 3_599_999) + "\n" + kline_line(JAN * 1000, JAN * 1000 + 3_599_999), "ซ้ำ"),
     ],
 )
 def test_parser_refuses_malformed_bars(line, problem):
     with pytest.raises(DownloadError, match=problem):
         parse_klines(line + "\n")
+
+
+GOOD = kline_line(JAN * 1000, JAN * 1000 + 3_599_999)
+NEXT = kline_line(JAN * 1000 + 3_600_000, JAN * 1000 + 7_199_999)
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        (f"{GOOD}\ngarbage\n{NEXT}\n", "บรรทัด 2: มี 1 ช่อง"),  # a stray line is never taken for a header
+        (f"{GOOD}\n1735693200O00,{NEXT.split(',', 1)[1]}\n", "บรรทัด 2: อ่านเวลาหรือตัวเลขไม่ได้"),  # broken time
+        (f"{GOOD}\n{','.join(KLINE_HEADER)}\n{NEXT}\n", "บรรทัด 2: อ่านเวลาหรือตัวเลขไม่ได้"),  # header mid-file
+        (f"time,open,high,low,close,volume,a,b,c,d,e,f\n{GOOD}\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),  # unknown header
+        (f"{GOOD}\n{NEXT},0\n", "บรรทัด 2: มี 13 ช่อง"),
+        (f"{GOOD}\n{NEXT.rsplit(',', 3)[0]}\n", "บรรทัด 2: มี 9 ช่อง"),  # cut short, no buy volume
+        (kline_line(JAN * 1000, JAN * 1000 + 3_599_999, o="abc") + "\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),
+        (kline_line(10**20, 10**20 + 3_599_999) + "\n", "บรรทัด 1: อ่านเวลาหรือตัวเลขไม่ได้"),  # past year 9999
+    ],
+)
+def test_parser_refuses_every_line_it_cannot_read(text, problem):
+    with pytest.raises(DownloadError, match=problem):
+        parse_klines(text)
+
+
+def test_parser_skips_only_blank_lines_and_binance_header_on_the_first_line(tmp_path):
+    t = datetime(2025, 1, 1, tzinfo=UTC)
+    expected = ([(t, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0), (t + H1, 1.0, 2.0, 0.5, 1.5, 10.0, 4.0)], [])
+    assert parse_klines(f"{GOOD}\n\n{NEXT}\n\n") == expected
+    assert parse_klines(f"{','.join(KLINE_HEADER).upper()}\r\n{GOOD}\r\n{NEXT}\r\n") == expected
+    fetch = fake_binance({"2025-01": zip_text("2025-01", f"﻿{','.join(KLINE_HEADER)}\n{GOOD}\n{NEXT}\n")})
+    assert download("BTCUSDT", "2025-01", "2025-01", tmp_path / "b.csv", fetch, lambda _m: None) == 2  # BOM ignored
+
+
+def test_a_file_that_is_not_text_is_reported_with_the_other_months(tmp_path):
+    fetch = fake_binance({"2025-01": zip_text("2025-01", b"\xff\xfe" + GOOD.encode()),
+                          "2025-02": zip_text("2025-02", "garbage\n")})
+    with pytest.raises(DownloadError, match="พบปัญหา 2 จุด") as err:
+        download("BTCUSDT", "2025-01", "2025-02", tmp_path / "b.csv", fetch, lambda _m: None)
+    assert "2025-01: ไฟล์เดือน 2025-01 อ่านเป็น CSV ไม่ได้" in str(err.value) and "2025-02: บรรทัด 1" in str(err.value)
+
+
+def test_a_bar_cut_short_by_an_exchange_halt_is_left_out_and_listed(tmp_path):
+    """The real 2018-02-08 00:00 bar closed at 00:28:14.788 when Binance stopped for maintenance."""
+    halt = kline_line(1518048000000, 1518049694788) + "\n"
+    rows, partial = parse_klines(kline_line(1518044400000, 1518047999999) + "\n" + halt)
+    assert [r[0].hour for r in rows] == [23] and len(partial) == 1
+    assert partial[0][0] == datetime(2018, 2, 8, tzinfo=UTC) and partial[0][1] == pytest.approx(28.25, abs=0.01)
+    blob = zip_text("2018-02", kline_line(1518044400000, 1518047999999) + "\n" + halt)
+    said = []
+    march = kline_zip("2018-03", [(datetime(2018, 3, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 4))])
+    fetch = fake_binance({"2018-02": blob, "2018-03": march})
+    assert download("BTCUSDT", "2018-02", "2018-03", tmp_path / "b.csv", fetch, said.append) == 2  # 7 Feb 23:00 + 1 Mar
+    assert "ตัดแท่งที่ Binance ปิดกลางชั่วโมงออก 1 แท่ง" in said[0]
+    assert any("2018-02-08 00:00 UTC ซื้อขายได้แค่ 28.2 นาที" in line for line in said)
+
+
+def zip_text(month, text):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(f"BTCUSDT-1h-{month}.csv", text)
+    return buf.getvalue()
+
+
+def test_a_short_bar_counts_as_a_halt_only_when_the_next_hour_is_missing(tmp_path):
+    early_close = kline_line(JAN * 1000, JAN * 1000 + 3_598_000)  # 59:58, then trading goes on at 01:00
+    next_hour = kline_line(JAN * 1000 + 3_600_000, JAN * 1000 + 7_199_999)
+    fetch = fake_binance({"2025-01": zip_text("2025-01", early_close + "\n" + next_hour + "\n")})
+    with pytest.raises(DownloadError, match="เวลาปิดน่าจะเสีย"):
+        download("BTCUSDT", "2025-01", "2025-01", tmp_path / "b.csv", fetch, lambda _m: None)
+    last = int(datetime(2025, 1, 31, 23, tzinfo=UTC).timestamp()) * 1000
+    fetch = fake_binance({"2025-01": zip_text("2025-01", next_hour + "\n" + kline_line(last, last + 1_000_000) + "\n")})
+    with pytest.raises(DownloadError, match="แท่งสุดท้ายของช่วง"):  # nothing after it to show trading stopped
+        download("BTCUSDT", "2025-01", "2025-01", tmp_path / "b.csv", fetch, lambda _m: None)
+    assert not (tmp_path / "b.csv").exists()
+
+
+def test_many_short_bars_in_a_month_mean_a_broken_file():
+    lines = [kline_line(JAN * 10**6 + h * 3600 * 10**6, JAN * 10**6 + h * 3600 * 10**6 + 3_599_999) for h in range(5)]
+    # microsecond opens with millisecond-sized spans: five 3.6-second bars
+    fetch = fake_binance({"2025-01": zip_text("2025-01", "\n".join(lines) + "\n")})
+    with pytest.raises(DownloadError, match="หน่วยเวลา"):
+        download("BTCUSDT", "2025-01", "2025-01", "unused.csv", fetch, lambda _m: None)
+
+
+def test_every_month_is_checked_before_giving_up(tmp_path):
+    good = [(datetime(2025, 1, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 4))]
+    bad = [(datetime(2025, 2, 1, tzinfo=UTC), (3, 2, 0.5, 1.5, 10, 4))]  # open above the high
+    worse = [(datetime(2025, 3, 1, tzinfo=UTC), (1, 2, 0.5, 1.5, 10, 11))]  # more buys than volume
+    fetch = fake_binance({"2025-01": kline_zip("2025-01", good), "2025-02": kline_zip("2025-02", bad),
+                          "2025-03": kline_zip("2025-03", worse)})
+    with pytest.raises(DownloadError, match="พบปัญหา 2 จุด") as err:
+        download("BTCUSDT", "2025-01", "2025-03", tmp_path / "b.csv", fetch, lambda _m: None)
+    assert "2025-02" in str(err.value) and "2025-03" in str(err.value)
+    assert not (tmp_path / "b.csv").exists()
 
 
 def test_download_refuses_bars_of_another_month_or_twice(tmp_path):
